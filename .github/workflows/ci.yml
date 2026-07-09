@@ -114,3 +114,31 @@ jobs:
         run: sh install.sh --uninstall -y
       - name: verify uninstall
         run: ! dpkg -s modrex 2>/dev/null
+
+  # No GitHub-hosted runner ships dnf/rpm natively, so this runs inside a
+  # Fedora container on top of ubuntu-latest — the only way to exercise the
+  # real dnf + rpm path, which (unlike .deb) has never run anywhere, not even
+  # manually. Containers run as root by default, so require_sudo's `id -u
+  # -eq 0` check short-circuits and no sudo package is needed.
+  rpm-integration:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    env:
+      CFG_SCHEMA_VERSION: '1'
+      CFG_PROJECT_NAME: modrex
+      CFG_GITHUB_REPO: modrexio/modrex
+      CFG_MANIFEST_URL: https://github.com/modrexio/modrex/releases/latest/download/latest.json
+      CFG_INSTALL_DIR: $HOME/.local/bin
+    steps:
+      - uses: actions/checkout@v4
+      - name: install deps
+        run: dnf install -y curl jq minisign
+      - name: install (native dnf path)
+        run: sh install.sh
+      - name: verify install
+        run: rpm -q modrex
+      - name: uninstall
+        run: sh install.sh --uninstall -y
+      - name: verify uninstall
+        run: ! rpm -q modrex 2>/dev/null

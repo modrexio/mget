@@ -145,9 +145,11 @@ the most common accidental-breaking-change shape for a config-driven script
 like this one. Tag pushes additionally run full install+uninstall integration
 tests against modrex's real release: one forcing the AppImage path, one
 exercising the native `.deb`/apt-get path (Ubuntu runners have `apt-get`
-natively, so this needs no forcing). None of this proves a change is
-*intentionally* non-breaking — that's still a human call when deciding the
-version bump — but it catches accidental regressions before a tag becomes
+natively, so this needs no forcing), and one exercising the native `.rpm`/dnf
+path inside a Fedora container (no GitHub-hosted runner ships dnf/rpm
+natively). None of this proves a change is *intentionally* non-breaking —
+that's still a human call when deciding the version bump — but it catches
+accidental regressions before a tag becomes
 eligible for `v1`/`latest` auto-pickup.
 
 **Every flattened value must be a properly quoted shell literal.** The engine
