@@ -108,10 +108,47 @@ Lives at the root of each project's own repo.
 
 ## Worker integration
 
-Each project's Worker does three things: fetch a **pinned tag** of this repo's
-`install.sh` (never `@main`, so a bad push here can't break every project's
-install at once), fetch that project's `install.config.json`, and concatenate
-them with the config flattened into `CFG_*` exports ahead of the engine body.
+Each project's Worker does three things: resolve an **engine pin** to a real
+tag of this repo's `install.sh` (never `@main`, so a bad push here can't break
+every project's install at once), fetch that project's `install.config.json`,
+and concatenate them with the config flattened into `CFG_*` exports ahead of
+the engine body.
+
+The pin can take three forms, in increasing order of auto-update convenience
+and decreasing order of safety:
+
+| Pin | Resolves to | Extra API call |
+|---|---|---|
+| `v1.1.0` (exact tag) | exactly that tag, always | no |
+| `v1` (bare major) | the latest `v1.x.x` tag | yes, on every request |
+| `latest` | GitHub's newest release overall, including majors | yes, on every request |
+
+A bare major auto-picks up patches/minors (bug fixes, new optional config
+fields) without anyone touching the Worker, but never jumps to a breaking
+major — the same convention as GitHub Actions' `@v4`-style tags. This only
+holds if mget's own SemVer discipline (major = breaking, minor = new
+capability, patch = fix) is actually followed; the `cfg-interface-diff` CI
+check (below) catches the most common accidental-breaking-change shape for
+this discipline. `latest` has no such guardrail — a bad `mget` release
+reaches every consumer pinned to `latest` immediately, no review step. Prefer
+`v1` over `latest` unless you specifically want full auto-update over safety.
+The two API-resolved forms add a third fetch (GitHub tags/releases API) on
+top of the two the Worker already makes, subject to the same 60 req/hour/IP
+limit noted above.
+
+## CI
+
+Every push runs syntax checks (`dash -n`, `bash --posix -n`, `shellcheck`)
+and `cfg-interface-diff`, which compares the set of `CFG_*` variables the
+script reads against the last tagged release and fails if any disappeared —
+the most common accidental-breaking-change shape for a config-driven script
+like this one. Tag pushes additionally run full install+uninstall integration
+tests against modrex's real release: one forcing the AppImage path, one
+exercising the native `.deb`/apt-get path (Ubuntu runners have `apt-get`
+natively, so this needs no forcing). None of this proves a change is
+*intentionally* non-breaking — that's still a human call when deciding the
+version bump — but it catches accidental regressions before a tag becomes
+eligible for `v1`/`latest` auto-pickup.
 
 **Every flattened value must be a properly quoted shell literal.** The engine
 removed `eval` from its own path handling, but that only protects against

@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: syntax check (dash)
+        run: dash -n install.sh
+      - name: syntax check (bash --posix)
+        run: bash --posix -n install.sh
+      - name: shellcheck
+        # Informational, not blocking: the script deliberately uses `local`,
+        # which shellcheck flags under strict POSIX even though every shell
+        # this engine actually targets (dash, bash, busybox ash) supports it.
+        run: shellcheck -s sh install.sh || true
+
+  # A config field silently disappearing (renamed, dropped) is the most
+  # common accidental-breaking-change shape for a config-driven script like
+  # this one — and it's mechanically detectable. Real intent (does removing
+  # a field actually break anyone) still needs a human, but this catches the
+  # "forgot this was load-bearing" case before a v1-floating consumer does.
+  cfg-interface-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: compare CFG_* surface against the last tagged release
+        run: |
+          current_tag=$(git describe --tags --exact-match HEAD 2>/dev/null || true)
+          prev_tag=$(git tag --sort=-v:refname | grep -vx "$current_tag" | head -1)
+          if [ -z "$prev_tag" ]; then
+            echo "no previous tag to compare against, skipping"
+            exit 0
+          fi
+          echo "comparing against $prev_tag"
+          git show "$prev_tag:install.sh" | grep -oE 'CFG_[A-Z_]+' | sort -u > /tmp/old_cfg.txt
+          grep -oE 'CFG_[A-Z_]+' install.sh | sort -u > /tmp/new_cfg.txt
+          removed=$(comm -23 /tmp/old_cfg.txt /tmp/new_cfg.txt)
+          if [ -n "$removed" ]; then
+            echo "::error::These CFG_* variables existed in $prev_tag but are gone now — likely a breaking change:"
+            echo "$removed"
+            exit 1
+          fi
+          echo "no CFG_* variables were removed since $prev_tag"
+
+  # Only run the real end-to-end installs on a tag push, not every commit —
+  # each one downloads modrex's actual ~86MB release asset and does a real
+  # sudo install, which is the right cost for "does this release actually
+  # work" but not for every work-in-progress push to main.
+  appimage-integration:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    env:
+      CFG_SCHEMA_VERSION: '1'
+      CFG_PROJECT_NAME: modrex
+      CFG_GITHUB_REPO: modrexio/modrex
+      CFG_MANIFEST_URL: https://github.com/modrexio/modrex/releases/latest/download/latest.json
+      CFG_INSTALL_DIR: $HOME/.local/bin
+    steps:
+      - uses: actions/checkout@v4
+      - name: install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq minisign
+      - name: install (forced AppImage path)
+        env:
+          CFG_PUBKEY: RWTX2KsFhWADAjKhVxTe/CxS/HT+S3iMqrQorXSP/QUE20RjzISVRUbV
+          CFG_PREFERRED_VARIANT: 'linux:appimage'
+        run: sh install.sh
+      - name: verify install
+        run: |
+          test -x "$HOME/.local/bin/modrex"
+          test -f "$HOME/.local/share/applications/modrex.desktop"
+          ls "$HOME"/.local/share/icons/modrex.* >/dev/null
+      - name: uninstall
+        run: sh install.sh --uninstall -y
+      - name: verify uninstall
+        run: |
+          ! test -e "$HOME/.local/bin/modrex"
+          ! test -e "$HOME/.local/share/applications/modrex.desktop"
+          ! test -e "$HOME/.modrex/uninstall.json"
+
+  # Ubuntu runners have apt-get natively, so this exercises the .deb +
+  # apt-get install/remove path with no forcing — the path that, as of this
+  # writing, has never been tested on any real Debian/Ubuntu machine.
+  deb-integration:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    env:
+      CFG_SCHEMA_VERSION: '1'
+      CFG_PROJECT_NAME: modrex
+      CFG_GITHUB_REPO: modrexio/modrex
+      CFG_MANIFEST_URL: https://github.com/modrexio/modrex/releases/latest/download/latest.json
+      CFG_INSTALL_DIR: $HOME/.local/bin
+    steps:
+      - uses: actions/checkout@v4
+      - name: install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq minisign
+      - name: install (native apt path)
+        run: sh install.sh
+      - name: verify install
+        run: dpkg -s modrex
+      - name: uninstall
+        run: sh install.sh --uninstall -y
+      - name: verify uninstall
+        run: ! dpkg -s modrex 2>/dev/null
