@@ -5,12 +5,16 @@ set -eu
 
 DRY_RUN=0
 UNINSTALL=0
+ASSUME_YES=0
+PURGE=0
 VERSION_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --uninstall) UNINSTALL=1 ;;
+    -y|--yes) ASSUME_YES=1 ;;
+    --purge) PURGE=1 ;;
     --version)
       [ $# -ge 2 ] || { echo "error: --version requires an argument" >&2; exit 1; }
       VERSION_OVERRIDE="$2"; shift ;;
@@ -21,6 +25,7 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+[ "$PURGE" -eq 1 ] && [ "$UNINSTALL" -eq 0 ] && { echo "error: --purge only applies to --uninstall" >&2; exit 1; }
 
 : "${CFG_SCHEMA_VERSION:?missing CFG_SCHEMA_VERSION}"
 [ "$CFG_SCHEMA_VERSION" = "1" ] || { echo "error: unsupported config schema version: $CFG_SCHEMA_VERSION" >&2; exit 1; }
@@ -42,6 +47,10 @@ CFG_MACOS_EXECUTABLE_NAME="${CFG_MACOS_EXECUTABLE_NAME:-$CFG_PROJECT_NAME}"
 # let a project declare the true identifier instead of assuming they match.
 CFG_DEB_PACKAGE_NAME="${CFG_DEB_PACKAGE_NAME:-$CFG_PROJECT_NAME}"
 CFG_RPM_PACKAGE_NAME="${CFG_RPM_PACKAGE_NAME:-$CFG_PROJECT_NAME}"
+# The project's own public curl URL (e.g. https://modrex.net/install.sh), used
+# only to print an accurate --uninstall hint after a successful install. This
+# engine has no way to know its own public URL otherwise.
+CFG_INSTALL_URL="${CFG_INSTALL_URL:-}"
 # Per-OS preferred packaging variant, e.g. "linux:appimage darwin:app" — space-separated
 # key:value pairs, since env vars can't carry a nested JSON object.
 CFG_PREFERRED_VARIANT="${CFG_PREFERRED_VARIANT:-}"
@@ -95,8 +104,9 @@ CFG_UNINSTALL_MANIFEST=$(expand_home_path "$CFG_UNINSTALL_MANIFEST") \
 
 # A path value is later interpolated into a double-quoted line appended to
 # the user's shell rc file (export PATH="$INSTALL_DIR:$PATH"). Double-quoted
-# shell strings still expand $(...) and `...`, so an unrestricted path could
-# plant a command that runs the next time the user opens a shell — a delayed
+# shell strings still expand $(...) and old-style backtick substitution, so
+# an unrestricted path could plant a command that runs the next time the
+# user opens a shell — a delayed
 # injection eval-removal alone doesn't prevent. Restricting to ordinary path
 # characters closes that off entirely. ':' is excluded here specifically
 # (unlike the uninstall-manifest check below) because INSTALL_DIR is actually
@@ -119,6 +129,28 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 have curl || err "curl is required"
 have jq   || err "jq is required (e.g. 'apt install jq' / 'brew install jq')"
+
+# In the common curl-pipe-to-sh invocation, fd 0 (stdin) is the piped script
+# source, not the terminal — reading a prompt from it would consume script
+# bytes as the answer. /dev/tty is the real terminal regardless of how stdin
+# is wired, which is why scripts/install.sh's confirm() does the same thing.
+confirm() {
+  [ "$ASSUME_YES" -eq 1 ] && return 0
+  local reply=""
+  if [ -t 0 ]; then
+    printf '%s [y/N] ' "$1" >&2
+    read -r reply || reply=""
+  elif { : </dev/tty; } 2>/dev/null; then
+    printf '%s [y/N] ' "$1" >&2
+    read -r reply </dev/tty || reply=""
+  else
+    err "refusing to proceed without confirmation in a non-interactive shell — rerun with -y"
+  fi
+  case "$reply" in
+    [Yy]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 SUDO=""
 require_sudo() {
@@ -175,6 +207,15 @@ preferred_variant_for() {
 # URL that happened to redirect to plain http would otherwise be followed.
 curl_download() {
   curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --retry 2 "$1" -o "$2"
+}
+
+# Same as curl_download but with visible progress — for the actual asset
+# (an AppImage/deb/rpm/app.tar.gz can be 50-100MB+), a silent multi-minute
+# download looks hung. Not used for the tiny JSON fetches, where a progress
+# bar would just flash and add noise. curl's progress bar goes to stderr, so
+# it's unaffected by the outer curl-to-sh pipe carrying this script's own stdout.
+curl_download_progress() {
+  curl -fL --proto '=https' --proto-redir '=https' --connect-timeout 10 --retry 2 --progress-bar "$1" -o "$2"
 }
 
 # Looks up the actual asset list from the GitHub Releases API rather than
@@ -260,7 +301,7 @@ download_asset() {
 
   ASSET_FILE="$WORK_DIR/$(basename "${ASSET_URL%%\?*}")"
   info "downloading $(basename "$ASSET_FILE")"
-  curl_download "$ASSET_URL" "$ASSET_FILE" || err "download failed: $ASSET_URL"
+  curl_download_progress "$ASSET_URL" "$ASSET_FILE" || err "download failed: $ASSET_URL"
 }
 
 # .deb/.rpm assets found via the GitHub API aren't part of the signed Tauri
@@ -270,7 +311,7 @@ fetch_pattern_asset() {
   case "$ASSET_URL" in https://*) ;; *) err "asset URL is not https: $ASSET_URL" ;; esac
   ASSET_FILE="$WORK_DIR/$(basename "${ASSET_URL%%\?*}")"
   info "downloading $(basename "$ASSET_FILE")"
-  curl_download "$ASSET_URL" "$ASSET_FILE" \
+  curl_download_progress "$ASSET_URL" "$ASSET_FILE" \
     || err "download failed: $ASSET_URL (does this release actually publish this asset?)"
   warn "no manifest signature available for this asset — verifying via HTTPS only"
 }
@@ -551,8 +592,10 @@ do_uninstall() {
   [ "$manifest_install_dir" = "$INSTALL_DIR" ] \
     || err "install_dir ('$INSTALL_DIR') differs from what was recorded at install time ('$manifest_install_dir') — uninstall would not find the real files. Re-run without --install-dir, or with the same install_dir used to install."
 
+  confirm "Remove $CFG_PROJECT_NAME ($INSTALL_DIR/$CFG_PROJECT_NAME and related files)?" || err "aborted"
+
   # Written to a file rather than piped straight into the loop: a pipeline's
-  # exit status is its last command's, so `jq ... | while read; do` would
+  # exit status is its last command's, so piping jq into a while-read loop would
   # silently treat a jq failure as "nothing to uninstall" and still report success.
   files_list="$WORK_DIR/uninstall-files"
   jq -r '.files[]' "$CFG_UNINSTALL_MANIFEST" > "$files_list" \
@@ -567,10 +610,22 @@ do_uninstall() {
   done < "$files_list"
 
   rm -f "$CFG_UNINSTALL_MANIFEST"
+
+  if [ "$PURGE" -eq 1 ]; then
+    confirm "Also remove settings, cache, and data (\$HOME/.config/$CFG_PROJECT_NAME, \$HOME/.cache/$CFG_PROJECT_NAME, \$HOME/.local/share/$CFG_PROJECT_NAME)?" \
+      || err "aborted"
+    for dir in "$HOME/.config/$CFG_PROJECT_NAME" "$HOME/.cache/$CFG_PROJECT_NAME" "$HOME/.local/share/$CFG_PROJECT_NAME"; do
+      [ -d "$dir" ] || continue
+      rm -rf -- "$dir"
+      info "removed $dir"
+    done
+  fi
+
   info "done. (PATH entry left in your shell rc file — remove manually if desired)"
 }
 
 main() {
+  local uninstall_hint
   if [ "$UNINSTALL" -eq 1 ]; then do_uninstall; exit 0; fi
   [ -z "$VERSION_OVERRIDE" ] || err "--version is not supported yet (this installer always installs latest)"
 
@@ -609,6 +664,19 @@ main() {
   if [ -n "$CFG_POST_INSTALL_CMD" ] && ! sh -c "$CFG_POST_INSTALL_CMD"; then
     warn "post-install command failed: $CFG_POST_INSTALL_CMD"
   fi
+
+  # $0 is the literal string "sh" when piped via curl, so a local-file
+  # invocation hint is only meaningful when $0 really is a script on disk.
+  if [ -n "$CFG_INSTALL_URL" ]; then
+    uninstall_hint="curl -fsSL $CFG_INSTALL_URL | sh -s -- --uninstall"
+  elif [ -f "$0" ]; then
+    uninstall_hint="sh $0 --uninstall"
+  else
+    uninstall_hint="re-run this installer with --uninstall"
+  fi
+  echo ""
+  info "Launch $CFG_PROJECT_NAME from your app menu, or run '$CFG_PROJECT_NAME'."
+  info "Uninstall: $uninstall_hint"
 }
 
 main "$@"

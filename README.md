@@ -67,7 +67,8 @@ Lives at the root of each project's own repo.
   "install_dir": "$HOME/.local/bin",
   "add_to_path": true,
   "post_install_cmd": "modrex --version",
-  "uninstall_manifest": "$HOME/.modrex/uninstall.json"
+  "uninstall_manifest": "$HOME/.modrex/uninstall.json",
+  "install_url": "https://modrex.net/install.sh"
 }
 ```
 
@@ -86,6 +87,7 @@ Lives at the root of each project's own repo.
 | `add_to_path` | no | Default `true`. Never applied after a `.deb`/`.rpm` install, since the package manager already puts the binary on the system `PATH` |
 | `post_install_cmd` | no | A trusted shell command run via `sh -c` after install; a non-zero exit is reported as a warning, not fatal. This is executable code, not data — only trusted project maintainers should be able to set it, same trust level as the project's build pipeline or signing key |
 | `uninstall_manifest` | no | Defaults to `$HOME/.{project_name}/uninstall.json`. Same `$HOME/...`-or-absolute-path rule as `install_dir`, but *does* allow colons — this path is never inserted into `PATH` |
+| `install_url` | no | The project's own public install URL (e.g. `https://modrex.net/install.sh`). Used only to print an accurate `curl \| sh -s -- --uninstall` hint after a successful install — the engine has no way to know its own public URL otherwise. Without it, the hint falls back to `sh $0 --uninstall`, which only makes sense when run from a local file, not piped from curl |
 
 ## Known limitations
 
@@ -145,6 +147,7 @@ const flatConfig = {
   add_to_path: config.add_to_path ?? true,
   post_install_cmd: config.post_install_cmd ?? "",
   uninstall_manifest: config.uninstall_manifest ?? "",
+  install_url: config.install_url ?? "",
 };
 
 const prelude = Object.entries(flatConfig)
@@ -158,7 +161,21 @@ const prelude = Object.entries(flatConfig)
 curl -fsSL <project-install-url> | sh
 curl -fsSL <project-install-url> | sh -s -- --dry-run
 curl -fsSL <project-install-url> | sh -s -- --uninstall
+curl -fsSL <project-install-url> | sh -s -- --uninstall --purge
+curl -fsSL <project-install-url> | sh -s -- --uninstall -y
 ```
+
+`--purge` (uninstall only) additionally removes `$HOME/.config/{project_name}`,
+`$HOME/.cache/{project_name}`, and `$HOME/.local/share/{project_name}` — the
+default uninstall only removes what mget itself installed, leaving user
+settings/cache/data in place. `-y`/`--yes` skips the confirmation prompt
+uninstall otherwise asks (reads from `/dev/tty` directly, since stdin is the
+piped script source in the normal `curl | sh` invocation — without `-y` in a
+non-interactive shell with no controlling terminal, it refuses rather than
+guessing).
+
+A successful install prints a launch hint and, when the project sets
+`install_url` in its config, an accurate copy-pasteable uninstall command.
 
 Uninstall reads the state file written during install (`uninstall_manifest`,
 per-project). It validates that file records this same `project_name` and
