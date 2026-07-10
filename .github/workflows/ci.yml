@@ -51,6 +51,42 @@ jobs:
           fi
           echo "no CFG_* variables were removed since $prev_tag"
 
+  # Pin the known unsigned Refract release so a future signed latest release
+  # does not stop exercising mget's local ad-hoc signing path.
+  macos-integration:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    env:
+      CFG_SCHEMA_VERSION: '1'
+      CFG_PROJECT_NAME: refract
+      CFG_GITHUB_REPO: RefractMC/Refract_MC
+      CFG_MANIFEST_URL: https://github.com/RefractMC/Refract_MC/releases/download/v1.2.0/latest.json
+      CFG_PUBKEY: RWQkukf1kBwQ/86ivJEv75SqjTY69a/ygF8HPb9ZXNwQoi+A2L/dY875
+      CFG_MACOS_BUNDLE_NAME: Refract
+      CFG_MACOS_EXECUTABLE_NAME: refract-tauri
+      CFG_INSTALL_DIR: $HOME/.local/bin
+      CFG_ADD_TO_PATH: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install jq minisign
+      - name: Install unsigned app bundle
+        run: sh install.sh
+      - name: Verify install
+        run: |
+          app="$HOME/Applications/Refract.app"
+          test -x "$app/Contents/MacOS/refract-tauri"
+          test -L "$HOME/.local/bin/refract"
+          codesign --verify --deep --strict "$app"
+          codesign --display --verbose=2 "$app" 2>&1 | grep -q 'Signature=adhoc'
+      - name: Uninstall
+        run: sh install.sh --uninstall -y
+      - name: Verify uninstall
+        run: |
+          ! test -e "$HOME/Applications/Refract.app"
+          ! test -e "$HOME/.local/bin/refract"
+          ! test -e "$HOME/.refract/uninstall.json"
+
   # Only run the real end-to-end installs on a tag push, not every commit —
   # each one downloads modrex's actual ~86MB release asset and does a real
   # sudo install, which is the right cost for "does this release actually
