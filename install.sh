@@ -398,6 +398,31 @@ check_package_version() {
   esac
 }
 
+ensure_macos_signature() {
+  local app_bundle signature_error
+  app_bundle="$1"
+  signature_error="$WORK_DIR/codesign-verify.err"
+
+  have codesign || err "codesign is required to install macOS app bundles"
+
+  if codesign --verify --deep --strict "$app_bundle" 2>"$signature_error"; then
+    return
+  fi
+
+  # A bundle seal that exists but fails verification is a broken release
+  # artifact; replacing it would hide the real failure.
+  if [ -e "$app_bundle/Contents/_CodeSignature/CodeResources" ]; then
+    cat "$signature_error" >&2
+    err "macOS app bundle has an invalid code signature"
+  fi
+
+  info "applying a local ad-hoc code signature"
+  codesign --force --sign - --timestamp=none "$app_bundle" \
+    || err "failed to apply a local ad-hoc code signature"
+  codesign --verify --deep --strict "$app_bundle" \
+    || err "ad-hoc code signature verification failed"
+}
+
 install_asset() {
   local dest app_bundle app_count staged pkg_name macos_executable
   DESKTOP_FILES=""
@@ -428,6 +453,7 @@ $DESKTOP_FILES"
       # discovering the problem afterward.
       [ -x "$app_bundle/Contents/MacOS/$CFG_MACOS_EXECUTABLE_NAME" ] \
         || err "macOS executable not found at Contents/MacOS/$CFG_MACOS_EXECUTABLE_NAME (set macos_executable_name in config if it differs from project_name)"
+      ensure_macos_signature "$app_bundle"
 
       # Destination name is CFG_MACOS_BUNDLE_NAME, not the archive's own
       # filename, so it always matches what safe_remove is willing to touch.

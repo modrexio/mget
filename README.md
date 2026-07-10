@@ -32,6 +32,11 @@ asset directly.
      needs to be configured anywhere.
    - On Linux it prefers a native package manager (apt/dnf/zypper) over a plain
      AppImage, so updates keep flowing through the system package manager.
+   - On macOS it preserves valid app signatures and refuses bundles with broken
+     signatures. An unsigned bundle receives a local ad-hoc signature before install,
+     which satisfies macOS code-integrity checks without an Apple Developer account.
+     Ad-hoc signing does not identify the publisher or notarize the app, so macOS may
+     still require one-time approval in **System Settings > Privacy & Security**.
    - When a release ships more than one package of the same format, it prefers a
      filename mentioning this machine's architecture (`amd64`/`x86_64`/`arm64`/etc.),
      then double-checks the chosen package's own embedded architecture metadata before
