@@ -264,6 +264,11 @@ resolve_asset_source() {
   if [ -n "$variant" ] && [ -n "$(platform_field "${base_key}-${variant}" url)" ]; then
     ASSET_SOURCE=manifest; ASSET_KEY="${base_key}-${variant}"; return
   fi
+  # Tauri's bare Linux key is the AppImage. Honor an explicit AppImage
+  # preference before native package discovery when no suffixed alias exists.
+  if [ "$OS:$variant" = "linux:appimage" ] && [ -n "$(platform_field "$base_key" url)" ]; then
+    ASSET_SOURCE=manifest; ASSET_KEY="$base_key"; return
+  fi
 
   if [ "$OS" = linux ]; then
     case "$PKG_MANAGER" in
