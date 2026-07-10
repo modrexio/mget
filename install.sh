@@ -525,7 +525,7 @@ $INSTALL_DIR/$CFG_PROJECT_NAME"
 
 update_path() {
   local rc line
-  [ "$CFG_ADD_TO_PATH" = "true" ] || return
+  [ "$CFG_ADD_TO_PATH" = "true" ] || return 0
   case ":$PATH:" in *":$INSTALL_DIR:"*) return ;; esac
   case "${SHELL:-}" in
     */fish)
