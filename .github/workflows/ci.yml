@@ -149,7 +149,8 @@ jobs:
       - name: uninstall
         run: sh install.sh --uninstall -y
       - name: verify uninstall
-        run: ! dpkg -s modrex 2>/dev/null
+        run: |
+          ! dpkg -s modrex 2>/dev/null
 
   # No GitHub-hosted runner ships dnf/rpm natively, so this runs inside a
   # Fedora container on top of ubuntu-latest — the only way to exercise the
@@ -177,4 +178,5 @@ jobs:
       - name: uninstall
         run: sh install.sh --uninstall -y
       - name: verify uninstall
-        run: ! rpm -q modrex 2>/dev/null
+        run: |
+          ! rpm -q modrex 2>/dev/null
