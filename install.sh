@@ -133,7 +133,7 @@ have jq   || err "jq is required (e.g. 'apt install jq' / 'brew install jq')"
 # In the common curl-pipe-to-sh invocation, fd 0 (stdin) is the piped script
 # source, not the terminal — reading a prompt from it would consume script
 # bytes as the answer. /dev/tty is the real terminal regardless of how stdin
-# is wired, which is why scripts/install.sh's confirm() does the same thing.
+# is wired.
 confirm() {
   [ "$ASSUME_YES" -eq 1 ] && return 0
   local reply=""
@@ -172,8 +172,7 @@ detect_platform() {
   esac
 }
 
-# Native package manager, when present, is preferred over a raw AppImage —
-# same priority order as modrex's scripts/install.sh.
+# Native package manager, when present, is preferred over a raw AppImage.
 PKG_MANAGER=""
 detect_pkg_manager() {
   [ "$OS" = linux ] || return 0
@@ -310,8 +309,7 @@ download_asset() {
 }
 
 # .deb/.rpm assets found via the GitHub API aren't part of the signed Tauri
-# updater manifest, so there's nothing to verify them against — same unsigned
-# posture scripts/install.sh already has for these formats.
+# updater manifest, so there's nothing to verify them against.
 fetch_pattern_asset() {
   case "$ASSET_URL" in https://*) ;; *) err "asset URL is not https: $ASSET_URL" ;; esac
   ASSET_FILE="$WORK_DIR/$(basename "${ASSET_URL%%\?*}")"
@@ -340,7 +338,7 @@ verify_signature() {
 INSTALLED_FILES=""
 
 # Extracts the .desktop/icon pair AppImages carry internally and registers
-# them under the XDG user dirs, same layout as modrex's scripts/install.sh.
+# them under the XDG user dirs.
 # $1 is the AppImage to extract from (must be executable); $2 is the path the
 # binary will live at once installed, used as the desktop entry's Exec target.
 integrate_appimage_desktop() {

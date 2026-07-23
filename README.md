@@ -48,9 +48,7 @@ asset directly.
      also what makes uninstall safe: it records the real package identifier, and
      refuses to later remove anything else — even if the uninstall record itself is
      modified.
-   - It registers a `.desktop`/icon entry for AppImage installs, matching what modrex's
-     own `scripts/install.sh` already does. The two coexist; they aren't meant to
-     replace each other.
+   - It registers a `.desktop`/icon entry for AppImage installs.
 
 2. **Each project** (`modrex`, `Refract_MC`, ...) keeps an `install.config.json` in its
    own repo — see the schema below.
@@ -138,7 +136,7 @@ Config is never `eval`'d — only `$HOME/...` and absolute paths are accepted.
 - `.deb`/`.rpm` installs, discovered via the GitHub Releases API, are never
   signature-verified — those assets aren't part of the signed Tauri updater manifest,
   so mget doesn't currently consume any separate integrity metadata (hash or detached
-  signature) for them (same posture `scripts/install.sh` already has). Only the
+  signature) for them. Only the
   manifest-sourced asset (normally the AppImage) gets minisign verification when a
   project configures `pubkey`. The downloaded package's architecture/name metadata *is*
   checked before install — that catches a wrong-architecture asset and rejects packages
