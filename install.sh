@@ -151,7 +151,7 @@ confirm() {
   if [ -t 0 ]; then
     printf '%s [y/N] ' "$1" >&2
     read -r reply || reply=""
-  elif { : </dev/tty; } 2>/dev/null; then
+  elif (: </dev/tty) 2>/dev/null; then
     printf '%s [y/N] ' "$1" >&2
     read -r reply </dev/tty || reply=""
   else
@@ -176,7 +176,7 @@ choose_variant() {
   ext="$1"; manager="$2"
   if [ -t 0 ]; then
     read_from_stdin=1
-  elif { : </dev/tty; } 2>/dev/null; then
+  elif (: </dev/tty) 2>/dev/null; then
     read_from_stdin=0
   else
     VARIANT_CHOICE=native
