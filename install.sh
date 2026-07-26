@@ -8,6 +8,7 @@ UNINSTALL=0
 ASSUME_YES=0
 PURGE=0
 VERSION_OVERRIDE=""
+FORCE_FORMAT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -15,6 +16,15 @@ while [ $# -gt 0 ]; do
     --uninstall) UNINSTALL=1 ;;
     -y|--yes) ASSUME_YES=1 ;;
     --purge) PURGE=1 ;;
+    --appimage)
+      [ -z "$FORCE_FORMAT" ] || { echo "error: only one of --appimage/--deb/--rpm may be given" >&2; exit 1; }
+      FORCE_FORMAT=appimage ;;
+    --deb)
+      [ -z "$FORCE_FORMAT" ] || { echo "error: only one of --appimage/--deb/--rpm may be given" >&2; exit 1; }
+      FORCE_FORMAT=deb ;;
+    --rpm)
+      [ -z "$FORCE_FORMAT" ] || { echo "error: only one of --appimage/--deb/--rpm may be given" >&2; exit 1; }
+      FORCE_FORMAT=rpm ;;
     --version)
       [ $# -ge 2 ] || { echo "error: --version requires an argument" >&2; exit 1; }
       VERSION_OVERRIDE="$2"; shift ;;
@@ -26,6 +36,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ "$PURGE" -eq 1 ] && [ "$UNINSTALL" -eq 0 ] && { echo "error: --purge only applies to --uninstall" >&2; exit 1; }
+[ -n "$FORCE_FORMAT" ] && [ "$UNINSTALL" -eq 1 ] && { echo "error: --appimage/--deb/--rpm only apply when installing" >&2; exit 1; }
 
 : "${CFG_SCHEMA_VERSION:?missing CFG_SCHEMA_VERSION}"
 [ "$CFG_SCHEMA_VERSION" = "1" ] || { echo "error: unsupported config schema version: $CFG_SCHEMA_VERSION" >&2; exit 1; }
@@ -152,6 +163,54 @@ confirm() {
   esac
 }
 
+# Asks the user to pick between a resolved native package and the AppImage
+# alternative, when both exist for this platform. Sets VARIANT_CHOICE to
+# "native" or "appimage". Same /dev/tty fallback as confirm() so it still
+# works when stdin is the piped curl|sh script body — but unlike confirm(),
+# no reachable terminal at all just silently defaults to native rather than
+# erroring, since a scripted/non-interactive install must never hang or fail
+# on this.
+VARIANT_CHOICE=""
+choose_variant() {
+  local ext manager reply read_from_stdin
+  ext="$1"; manager="$2"
+  if [ -t 0 ]; then
+    read_from_stdin=1
+  elif { : </dev/tty; } 2>/dev/null; then
+    read_from_stdin=0
+  else
+    VARIANT_CHOICE=native
+    return
+  fi
+  {
+    printf '\n%s %s — choose install format:\n\n' "$CFG_PROJECT_NAME" "$VERSION"
+    printf '  1) .%s (%s)  [default]\n' "$ext" "$manager"
+    printf '  2) .AppImage\n'
+    printf 'Choice [1]: '
+  } >&2
+  if [ "$read_from_stdin" -eq 1 ]; then
+    read -r reply || reply=""
+  else
+    read -r reply </dev/tty || reply=""
+  fi
+  case "$reply" in
+    2) VARIANT_CHOICE=appimage ;;
+    *) VARIANT_CHOICE=native ;;
+  esac
+}
+
+# True (and prompts) only when a native package was actually found, an
+# AppImage alternative also exists, and neither -y nor an explicit
+# --deb/--rpm/--appimage flag already settled the question.
+maybe_prefer_appimage() {
+  local base_key ext manager
+  base_key="$1"; ext="$2"; manager="$3"
+  [ "$ASSUME_YES" -eq 0 ] || return 1
+  [ -n "$(platform_field "$base_key" url)" ] || return 1
+  choose_variant "$ext" "$manager"
+  [ "$VARIANT_CHOICE" = appimage ]
+}
+
 SUDO=""
 require_sudo() {
   [ "$(id -u)" -eq 0 ] && return
@@ -249,15 +308,48 @@ find_gh_asset_url() {
   ' "$WORK_DIR/gh_release.json"
 }
 
-# Precedence: an explicit preferred_variant manifest key wins; then, on Linux
-# with a detected package manager, a matching .deb/.rpm asset discovered via
-# the GitHub Releases API; then a deb/rpm manifest key if the project's
-# manifest happens to publish one; then the bare {os}-{arch} manifest key
-# (AppImage on Linux, .app on macOS).
+# Resolves a --appimage/--deb/--rpm flag directly, bypassing all
+# auto-detection (and the interactive prompt) since the user already
+# answered the question on the command line.
+resolve_forced_format() {
+  local base_key ext url
+  base_key="$1"
+  case "$FORCE_FORMAT" in
+    appimage)
+      [ "$OS" = linux ] || err "--appimage is only meaningful on Linux"
+      [ -n "$(platform_field "$base_key" url)" ] || err "no AppImage asset published for $base_key"
+      ASSET_SOURCE=manifest; ASSET_KEY="$base_key"
+      ;;
+    deb|rpm)
+      [ "$OS" = linux ] || err "--$FORCE_FORMAT is only meaningful on Linux"
+      ext="$FORCE_FORMAT"
+      if fetch_github_release; then
+        url=$(find_gh_asset_url "$ext")
+        [ -n "$url" ] && { ASSET_SOURCE=pattern; ASSET_URL="$url"; return; }
+      fi
+      if [ -n "$(platform_field "${base_key}-${ext}" url)" ]; then
+        ASSET_SOURCE=manifest; ASSET_KEY="${base_key}-${ext}"; return
+      fi
+      err "no .$ext asset found for $CFG_PROJECT_NAME (checked GitHub release assets and manifest key '${base_key}-${ext}')"
+      ;;
+  esac
+}
+
+# Precedence: an explicit --appimage/--deb/--rpm flag wins outright; then an
+# explicit preferred_variant manifest key; then, on Linux with a detected
+# package manager, a matching .deb/.rpm asset discovered via the GitHub
+# Releases API or a manifest key — offered interactively against the AppImage
+# alternative when both exist (see choose_variant); then the bare {os}-{arch}
+# manifest key (AppImage on Linux, .app on macOS).
 resolve_asset_source() {
   local base_key variant url
   base_key="${OS}-${ARCH}"
   ASSET_SOURCE=""
+
+  if [ -n "$FORCE_FORMAT" ]; then
+    resolve_forced_format "$base_key"
+    return
+  fi
 
   variant=$(preferred_variant_for "$OS")
   if [ -n "$variant" ] && [ -n "$(platform_field "${base_key}-${variant}" url)" ]; then
@@ -274,18 +366,30 @@ resolve_asset_source() {
       apt)
         if fetch_github_release; then
           url=$(find_gh_asset_url deb)
-          [ -n "$url" ] && { ASSET_SOURCE=pattern; ASSET_URL="$url"; return; }
+          if [ -n "$url" ]; then
+            maybe_prefer_appimage "$base_key" deb apt \
+              && { ASSET_SOURCE=manifest; ASSET_KEY="$base_key"; return; }
+            ASSET_SOURCE=pattern; ASSET_URL="$url"; return
+          fi
         fi
         if [ -n "$(platform_field "${base_key}-deb" url)" ]; then
+          maybe_prefer_appimage "$base_key" deb apt \
+            && { ASSET_SOURCE=manifest; ASSET_KEY="$base_key"; return; }
           ASSET_SOURCE=manifest; ASSET_KEY="${base_key}-deb"; return
         fi
         ;;
       dnf|zypper)
         if fetch_github_release; then
           url=$(find_gh_asset_url rpm)
-          [ -n "$url" ] && { ASSET_SOURCE=pattern; ASSET_URL="$url"; return; }
+          if [ -n "$url" ]; then
+            maybe_prefer_appimage "$base_key" rpm "$PKG_MANAGER" \
+              && { ASSET_SOURCE=manifest; ASSET_KEY="$base_key"; return; }
+            ASSET_SOURCE=pattern; ASSET_URL="$url"; return
+          fi
         fi
         if [ -n "$(platform_field "${base_key}-rpm" url)" ]; then
+          maybe_prefer_appimage "$base_key" rpm "$PKG_MANAGER" \
+            && { ASSET_SOURCE=manifest; ASSET_KEY="$base_key"; return; }
           ASSET_SOURCE=manifest; ASSET_KEY="${base_key}-rpm"; return
         fi
         ;;

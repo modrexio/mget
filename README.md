@@ -30,8 +30,13 @@ asset directly.
    - It reads the project's Tauri updater manifest to pick the right platform asset, or
      looks up a `.deb`/`.rpm` on the GitHub Releases API directly — no exact filename
      needs to be configured anywhere.
-   - On Linux it prefers a native package manager (apt/dnf/zypper) over a plain
-     AppImage, so updates keep flowing through the system package manager.
+   - On Linux, when a native package manager (apt/dnf/zypper) is detected and both a
+     native package (`.deb`/`.rpm`) and an AppImage are available, it asks which to
+     install (native is the default) — so updates can keep flowing through the system
+     package manager, without silently deciding that for the user. The prompt is skipped
+     — defaulting to the native package — when `-y`/`--yes` is passed or no terminal is
+     reachable (e.g. CI, a non-interactive `curl | sh`). Pass `--appimage`, `--deb`, or
+     `--rpm` to pick a format up front and skip the prompt entirely.
    - On macOS it preserves valid app signatures and refuses bundles with broken
      signatures. An unsigned bundle receives a local ad-hoc signature before install,
      which satisfies macOS code-integrity checks without an Apple Developer account.
@@ -250,19 +255,29 @@ tag becomes eligible for `v1`/`latest` auto-pickup.
 ```
 curl -fsSL <project-install-url> | sh
 curl -fsSL <project-install-url> | sh -s -- --dry-run
+curl -fsSL <project-install-url> | sh -s -- --appimage
+curl -fsSL <project-install-url> | sh -s -- --deb
+curl -fsSL <project-install-url> | sh -s -- --rpm
 curl -fsSL <project-install-url> | sh -s -- --uninstall
 curl -fsSL <project-install-url> | sh -s -- --uninstall --purge
 curl -fsSL <project-install-url> | sh -s -- --uninstall -y
 ```
 
+- **`--appimage`/`--deb`/`--rpm`** (install only) picks the asset format up front instead
+  of auto-detecting and, when a native package is available, prompting. Only one may be
+  given. `--deb`/`--rpm` still work even without apt/dnf/zypper detected, as long as
+  `dpkg`/`rpm` is installed and the project's release actually publishes that format.
 - **`--purge`** (uninstall only) additionally removes `$HOME/.config/{project_name}`,
   `$HOME/.cache/{project_name}`, and `$HOME/.local/share/{project_name}`. The default
   uninstall only removes what mget itself installed, leaving user settings/cache/data
   in place.
-- **`-y`/`--yes`** skips the confirmation prompt uninstall otherwise asks. That prompt
-  reads from `/dev/tty` directly, since stdin is the piped script source in the normal
-  `curl | sh` invocation — without `-y` in a non-interactive shell with no controlling
-  terminal, it refuses rather than guessing.
+- **`-y`/`--yes`** skips both the install-time native-vs-AppImage prompt (defaulting to
+  the native package) and the uninstall confirmation prompt. Both prompts read from
+  `/dev/tty` directly, since stdin is the piped script source in the normal `curl | sh`
+  invocation. For uninstall specifically, `-y` is required in a non-interactive shell
+  with no controlling terminal — it refuses rather than guessing; the install-time prompt
+  instead just defaults to the native package in that case, so a plain `curl | sh` in a
+  script or CI never hangs.
 - A successful install prints a launch hint and, when the project sets `install_url` in
   its config, an accurate copy-pasteable uninstall command.
 
