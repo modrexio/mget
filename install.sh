@@ -141,6 +141,14 @@ have() { command -v "$1" >/dev/null 2>&1; }
 have curl || err "curl is required"
 have jq   || err "jq is required (e.g. 'apt install jq' / 'brew install jq')"
 
+# Signature verification tools are checked here rather than at their point of
+# use in verify_signature(), which runs only after the asset is fully
+# downloaded — failing there wastes a download on a problem knowable upfront.
+if [ -n "$CFG_PUBKEY" ]; then
+  have minisign || err "minisign is required to verify $CFG_PROJECT_NAME's signature (e.g. 'pacman -S minisign' / 'apt install minisign' / 'dnf install minisign' / 'brew install minisign')"
+  have base64   || err "base64 is required for signature verification"
+fi
+
 # In the common curl-pipe-to-sh invocation, fd 0 (stdin) is the piped script
 # source, not the terminal — reading a prompt from it would consume script
 # bytes as the answer. /dev/tty is the real terminal regardless of how stdin
