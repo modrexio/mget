@@ -210,11 +210,13 @@ choose_variant() {
 # True (and prompts) only when a native package was actually found, an
 # AppImage alternative also exists, and neither -y nor an explicit
 # --deb/--rpm/--appimage flag already settled the question.
+APPIMAGE_KEY=""
 maybe_prefer_appimage() {
   local base_key ext manager
   base_key="$1"; ext="$2"; manager="$3"
   [ "$ASSUME_YES" -eq 0 ] || return 1
-  [ -n "$(platform_field "$base_key" url)" ] || return 1
+  APPIMAGE_KEY=$(appimage_key "$base_key")
+  [ -n "$APPIMAGE_KEY" ] || return 1
   choose_variant "$ext" "$manager"
   [ "$VARIANT_CHOICE" = appimage ]
 }
@@ -257,6 +259,17 @@ fetch_manifest() {
 
 json_get() { jq -r ".$1" "$WORK_DIR/manifest.json"; }
 platform_field() { jq -r ".platforms[\"$1\"].$2 // empty" "$WORK_DIR/manifest.json"; }
+
+# Tauri's bare {os}-{arch} key is the AppImage, but a project that publishes
+# per-format variants (…-deb/…-rpm/…-appimage) may omit the bare key entirely.
+# Resolve to whichever key actually carries the AppImage, or empty if neither.
+appimage_key() {
+  if [ -n "$(platform_field "$1" url)" ]; then
+    echo "$1"
+  elif [ -n "$(platform_field "${1}-appimage" url)" ]; then
+    echo "${1}-appimage"
+  fi
+}
 
 preferred_variant_for() {
   local pair
@@ -325,8 +338,9 @@ resolve_forced_format() {
   case "$FORCE_FORMAT" in
     appimage)
       [ "$OS" = linux ] || err "--appimage is only meaningful on Linux"
-      [ -n "$(platform_field "$base_key" url)" ] || err "no AppImage asset published for $base_key"
-      ASSET_SOURCE=manifest; ASSET_KEY="$base_key"
+      ASSET_KEY=$(appimage_key "$base_key")
+      [ -n "$ASSET_KEY" ] || err "no AppImage asset published for $base_key"
+      ASSET_SOURCE=manifest
       ;;
     deb|rpm)
       [ "$OS" = linux ] || err "--$FORCE_FORMAT is only meaningful on Linux"
@@ -376,13 +390,13 @@ resolve_asset_source() {
           url=$(find_gh_asset_url deb)
           if [ -n "$url" ]; then
             maybe_prefer_appimage "$base_key" deb apt \
-              && { ASSET_SOURCE=manifest; ASSET_KEY="$base_key"; return; }
+              && { ASSET_SOURCE=manifest; ASSET_KEY="$APPIMAGE_KEY"; return; }
             ASSET_SOURCE=pattern; ASSET_URL="$url"; return
           fi
         fi
         if [ -n "$(platform_field "${base_key}-deb" url)" ]; then
           maybe_prefer_appimage "$base_key" deb apt \
-            && { ASSET_SOURCE=manifest; ASSET_KEY="$base_key"; return; }
+            && { ASSET_SOURCE=manifest; ASSET_KEY="$APPIMAGE_KEY"; return; }
           ASSET_SOURCE=manifest; ASSET_KEY="${base_key}-deb"; return
         fi
         ;;
@@ -391,13 +405,13 @@ resolve_asset_source() {
           url=$(find_gh_asset_url rpm)
           if [ -n "$url" ]; then
             maybe_prefer_appimage "$base_key" rpm "$PKG_MANAGER" \
-              && { ASSET_SOURCE=manifest; ASSET_KEY="$base_key"; return; }
+              && { ASSET_SOURCE=manifest; ASSET_KEY="$APPIMAGE_KEY"; return; }
             ASSET_SOURCE=pattern; ASSET_URL="$url"; return
           fi
         fi
         if [ -n "$(platform_field "${base_key}-rpm" url)" ]; then
           maybe_prefer_appimage "$base_key" rpm "$PKG_MANAGER" \
-            && { ASSET_SOURCE=manifest; ASSET_KEY="$base_key"; return; }
+            && { ASSET_SOURCE=manifest; ASSET_KEY="$APPIMAGE_KEY"; return; }
           ASSET_SOURCE=manifest; ASSET_KEY="${base_key}-rpm"; return
         fi
         ;;
@@ -405,6 +419,12 @@ resolve_asset_source() {
   fi
 
   ASSET_SOURCE=manifest; ASSET_KEY="$base_key"
+  if [ "$OS" = linux ]; then
+    variant=$(appimage_key "$base_key")
+    if [ -n "$variant" ]; then
+      ASSET_KEY="$variant"
+    fi
+  fi
 }
 
 download_asset() {
