@@ -1,0 +1,31 @@
+name: Consumer packaging check
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: GitHub owner/repo whose release to check
+        required: true
+        type: string
+      command_name:
+        description: Executable every Linux/macOS artifact must provide
+        required: true
+        type: string
+      tag:
+        description: Release tag (default latest)
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: modrexio/mget
+      - name: install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq rpm
+      - run: sh tests/check-consumer.sh "${{ inputs.repo }}" "${{ inputs.command_name }}" "${{ inputs.tag }}"
