@@ -35,6 +35,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+  echo "error: do not run this installer with sudo: it installs into your own home directory and asks for sudo itself when a package manager needs it" >&2
+  exit 1
+fi
 [ "$PURGE" -eq 1 ] && [ "$UNINSTALL" -eq 0 ] && { echo "error: --purge only applies to --uninstall" >&2; exit 1; }
 [ -n "$FORCE_FORMAT" ] && [ "$UNINSTALL" -eq 1 ] && { echo "error: --appimage/--deb/--rpm only apply when installing" >&2; exit 1; }
 
@@ -49,7 +53,8 @@ CFG_ADD_TO_PATH="${CFG_ADD_TO_PATH:-true}"
 CFG_POST_INSTALL_CMD="${CFG_POST_INSTALL_CMD:-}"
 CFG_UNINSTALL_MANIFEST="${CFG_UNINSTALL_MANIFEST:-\$HOME/.$CFG_PROJECT_NAME/uninstall.json}"
 CFG_MACOS_BUNDLE_NAME="${CFG_MACOS_BUNDLE_NAME:-$CFG_PROJECT_NAME}"
-CFG_MACOS_EXECUTABLE_NAME="${CFG_MACOS_EXECUTABLE_NAME:-$CFG_PROJECT_NAME}"
+CFG_MACOS_EXECUTABLE_NAME="${CFG_MACOS_EXECUTABLE_NAME:-}"
+COMMAND_NAME="${CFG_COMMAND_NAME:-$CFG_PROJECT_NAME}"
 # Package identifiers don't necessarily match the project's display/command
 # name. Debian Policy (5.6.7) hard-requires lowercase and forbids underscores
 # in package names — a project_name like "Refract_MC" can never literally
@@ -78,6 +83,10 @@ case "$CFG_PROJECT_NAME" in
   .|..) echo "error: invalid project_name: $CFG_PROJECT_NAME" >&2; exit 1 ;;
   *[!A-Za-z0-9._-]*) echo "error: project_name may contain only letters, digits, '.', '_', '-'" >&2; exit 1 ;;
 esac
+case "$COMMAND_NAME" in
+  .|..) echo "error: invalid command_name: $COMMAND_NAME" >&2; exit 1 ;;
+  *[!A-Za-z0-9._-]*) echo "error: command_name may contain only letters, digits, '.', '_', '-'" >&2; exit 1 ;;
+esac
 # macOS bundle names may legitimately contain spaces, so only path-traversal
 # and control characters are rejected here, not the full project_name
 # character set. Any control character (not just newline) could corrupt the
@@ -93,6 +102,7 @@ fi
 # with no reason to contain a space, so it gets the same restricted set as
 # project_name rather than the looser bundle-name rules.
 case "$CFG_MACOS_EXECUTABLE_NAME" in
+  '') ;;
   .|..) echo "error: invalid macos_executable_name: $CFG_MACOS_EXECUTABLE_NAME" >&2; exit 1 ;;
   *[!A-Za-z0-9._-]*) echo "error: macos_executable_name may contain only letters, digits, '.', '_', '-'" >&2; exit 1 ;;
 esac
@@ -113,16 +123,6 @@ INSTALL_DIR=$(expand_home_path "$CFG_INSTALL_DIR") \
 CFG_UNINSTALL_MANIFEST=$(expand_home_path "$CFG_UNINSTALL_MANIFEST") \
   || { echo "error: CFG_UNINSTALL_MANIFEST must be an absolute path or start with \$HOME/: $CFG_UNINSTALL_MANIFEST" >&2; exit 1; }
 
-# A path value is later interpolated into a double-quoted line appended to
-# the user's shell rc file (export PATH="$INSTALL_DIR:$PATH"). Double-quoted
-# shell strings still expand $(...) and old-style backtick substitution, so
-# an unrestricted path could plant a command that runs the next time the
-# user opens a shell — a delayed
-# injection eval-removal alone doesn't prevent. Restricting to ordinary path
-# characters closes that off entirely. ':' is excluded here specifically
-# (unlike the uninstall-manifest check below) because INSTALL_DIR is actually
-# inserted into PATH — an embedded ':' would silently split it into two PATH
-# entries, and a non-absolute second entry is a classic command-hijack vector.
 case "$INSTALL_DIR" in
   *[!A-Za-z0-9_./+-]*) echo "error: install_dir contains unsupported characters: $INSTALL_DIR" >&2; exit 1 ;;
 esac
@@ -214,7 +214,7 @@ APPIMAGE_KEY=""
 maybe_prefer_appimage() {
   local base_key ext manager
   base_key="$1"; ext="$2"; manager="$3"
-  [ "$ASSUME_YES" -eq 0 ] || return 1
+  [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] || return 1
   APPIMAGE_KEY=$(appimage_key "$base_key")
   [ -n "$APPIMAGE_KEY" ] || return 1
   choose_variant "$ext" "$manager"
@@ -559,20 +559,21 @@ ensure_macos_signature() {
 }
 
 install_asset() {
-  local dest app_bundle app_count staged pkg_name macos_executable
+  local dest app_bundle app_count staged pkg_name macos_executable f
   DESKTOP_FILES=""
-  # .deb/.rpm installs put their binary on the system PATH themselves via the
-  # package manager — adding $INSTALL_DIR (which they never touch) would just
-  # be a misleading no-op entry in the user's shell rc.
-  case "$ASSET_FILE" in *.deb|*.rpm) NEEDS_PATH_UPDATE=0 ;; *) NEEDS_PATH_UPDATE=1 ;; esac
-  mkdir -p "$INSTALL_DIR"
+  INSTALLED_PATH=""
+  PROVIDED_BINS=""
+  case "$ASSET_FILE" in *.deb|*.rpm) ;; *) mkdir -p "$INSTALL_DIR" ;; esac
   case "$ASSET_FILE" in
     *.AppImage)
-      dest="$INSTALL_DIR/$CFG_PROJECT_NAME"
-      staged="$INSTALL_DIR/.${CFG_PROJECT_NAME}.new.$$"
+      have fusermount || have fusermount3 \
+        || warn "neither fusermount nor fusermount3 is installed; the AppImage may not start until your distribution's fuse package is installed"
+      dest="$INSTALL_DIR/$COMMAND_NAME"
+      staged="$INSTALL_DIR/.${COMMAND_NAME}.new.$$"
       cp "$ASSET_FILE" "$staged"; chmod +x "$staged"
       [ "$OS" = linux ] && integrate_appimage_desktop "$staged" "$dest"
       mv -f "$staged" "$dest"
+      INSTALLED_PATH="$dest"
       INSTALLED_FILES="$dest"
       [ -n "$DESKTOP_FILES" ] && INSTALLED_FILES="$INSTALLED_FILES
 $DESKTOP_FILES"
@@ -582,12 +583,16 @@ $DESKTOP_FILES"
       app_count=$(find "$WORK_DIR" -maxdepth 1 -name '*.app' | wc -l)
       [ "$app_count" -eq 1 ] || err "expected exactly one .app bundle in the archive, found $app_count"
       app_bundle=$(find "$WORK_DIR" -maxdepth 1 -name '*.app')
+      macos_executable="$CFG_MACOS_EXECUTABLE_NAME"
+      [ -n "$macos_executable" ] \
+        || macos_executable=$(plutil -extract CFBundleExecutable raw -o - "$app_bundle/Contents/Info.plist" 2>/dev/null) \
+        || err "could not read CFBundleExecutable from the app bundle (set macos_executable_name in config)"
       # Validated on the extracted bundle before it ever replaces the working
       # install — catching a bad bundle here means the old version (and its
       # backup) is never touched, instead of being discarded first and only
       # discovering the problem afterward.
-      [ -x "$app_bundle/Contents/MacOS/$CFG_MACOS_EXECUTABLE_NAME" ] \
-        || err "macOS executable not found at Contents/MacOS/$CFG_MACOS_EXECUTABLE_NAME (set macos_executable_name in config if it differs from project_name)"
+      [ -x "$app_bundle/Contents/MacOS/$macos_executable" ] \
+        || err "macOS executable not found at Contents/MacOS/$macos_executable"
       ensure_macos_signature "$app_bundle"
 
       # Destination name is CFG_MACOS_BUNDLE_NAME, not the archive's own
@@ -602,10 +607,10 @@ $DESKTOP_FILES"
         [ -e "$dest.old" ] && mv "$dest.old" "$dest"
         err "failed to install new app bundle; previous version restored"
       fi
-      macos_executable="$dest/Contents/MacOS/$CFG_MACOS_EXECUTABLE_NAME"
-      ln -sf "$macos_executable" "$INSTALL_DIR/$CFG_PROJECT_NAME"
+      ln -sf "$dest/Contents/MacOS/$macos_executable" "$INSTALL_DIR/$COMMAND_NAME"
+      INSTALLED_PATH="$INSTALL_DIR/$COMMAND_NAME"
       INSTALLED_FILES="$dest
-$INSTALL_DIR/$CFG_PROJECT_NAME"
+$INSTALL_DIR/$COMMAND_NAME"
       ;;
     *.deb)
       have dpkg-deb || err "dpkg-deb is required to inspect .deb packages"
@@ -625,6 +630,7 @@ $INSTALL_DIR/$CFG_PROJECT_NAME"
         $SUDO dpkg -i "$ASSET_FILE"
         INSTALLED_FILES="pkg:dpkg:$pkg_name"
       fi
+      PROVIDED_BINS=$(dpkg -L "$pkg_name" 2>/dev/null | grep -E '^/usr/bin/[^/]+$' || true)
       ;;
     *.rpm)
       have rpm || err "rpm is required to inspect .rpm packages"
@@ -651,37 +657,88 @@ $INSTALL_DIR/$CFG_PROJECT_NAME"
           INSTALLED_FILES="pkg:rpm:$pkg_name"
           ;;
       esac
+      PROVIDED_BINS=$(rpm -ql "$pkg_name" 2>/dev/null | grep -E '^/usr/bin/[^/]+$' || true)
       ;;
     *)
       err "don't know how to install asset type: $ASSET_FILE"
       ;;
   esac
+  for f in $PROVIDED_BINS; do
+    if [ "$f" = "/usr/bin/$COMMAND_NAME" ]; then INSTALLED_PATH="$f"; fi
+  done
 }
 
-update_path() {
-  local rc line
-  [ "$CFG_ADD_TO_PATH" = "true" ] || return 0
-  case ":$PATH:" in *":$INSTALL_DIR:"*) return ;; esac
-  case "${SHELL:-}" in
-    */fish)
-      rc="$HOME/.config/fish/config.fish"
-      mkdir -p "$(dirname "$rc")"
-      line="fish_add_path \"$INSTALL_DIR\"  # added by $CFG_PROJECT_NAME installer"
+command_copies() {
+  local rest d p seen q
+  rest="$PATH:"; seen=""
+  while [ -n "$rest" ]; do
+    d="${rest%%:*}"; rest="${rest#*:}"; p="$d/$COMMAND_NAME"
+    [ -n "$d" ] && [ -x "$p" ] && [ ! -d "$p" ] || continue
+    for q in $seen; do [ "$q" -ef "$p" ] && continue 2; done
+    seen="$seen $p"; printf '%s\n' "$p"
+  done
+}
+
+recorded() {
+  [ -f "$CFG_UNINSTALL_MANIFEST" ] \
+    && jq -e --arg p "$1" '(.files | index($p)) != null or (($p | test("^/(usr/)?s?bin/")) and (.files | any(startswith("pkg:"))))' \
+         "$CFG_UNINSTALL_MANIFEST" >/dev/null 2>&1
+}
+
+owner_label() {
+  if recorded "$1"; then echo "recorded by this installer"; else echo "not installed by this installer"; fi
+}
+
+report_install() {
+  local manager resolved p
+  case "$INSTALLED_FILES" in
+    pkg:*)
+      manager="${INSTALLED_FILES#pkg:}"; manager="${manager%%:*}"
+      info "installed $CFG_PROJECT_NAME $VERSION via $manager (provides: $(printf '%s' "$PROVIDED_BINS" | tr '\n' ' '))"
+      [ -n "$INSTALLED_PATH" ] || warn "this package does not provide a '$COMMAND_NAME' command"
       ;;
-    */zsh) rc="$HOME/.zshrc"; line="export PATH=\"$INSTALL_DIR:\$PATH\"  # added by $CFG_PROJECT_NAME installer" ;;
-    */bash) rc="$HOME/.bashrc"; line="export PATH=\"$INSTALL_DIR:\$PATH\"  # added by $CFG_PROJECT_NAME installer" ;;
-    *) rc="$HOME/.profile"; line="export PATH=\"$INSTALL_DIR:\$PATH\"  # added by $CFG_PROJECT_NAME installer" ;;
+    *) info "installed $INSTALLED_PATH" ;;
   esac
-  grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null || { echo "$line" >> "$rc"; info "added $INSTALL_DIR to PATH in $rc (restart your shell)"; }
+  resolved=$(command_copies | head -n 1)
+  if [ -n "$INSTALLED_PATH" ] && [ -n "$resolved" ] && [ "$resolved" -ef "$INSTALLED_PATH" ]; then
+    info "'$COMMAND_NAME' is available in this terminal"
+  elif [ -n "$resolved" ]; then
+    warn "'$COMMAND_NAME' currently runs $resolved ($(owner_label "$resolved")), not the copy just installed"
+  elif [ -n "$INSTALLED_PATH" ]; then
+    info "'$COMMAND_NAME' is not on your PATH in this terminal. Launch $CFG_PROJECT_NAME from your application menu, or use it as a terminal command by adding $INSTALL_DIR to your shell's PATH, or by exposing it system-wide:"
+    info "  sudo ln -s $INSTALLED_PATH /usr/local/bin/$COMMAND_NAME"
+  fi
+  command_copies | while IFS= read -r p; do
+    [ -n "$INSTALLED_PATH" ] && [ "$p" -ef "$INSTALLED_PATH" ] && continue
+    warn "another '$COMMAND_NAME' is on PATH: $p ($(owner_label "$p"))"
+  done
+  if jq -e '(.files | any(startswith("pkg:"))) and (.files | any(startswith("/")))' "$CFG_UNINSTALL_MANIFEST" >/dev/null 2>&1; then
+    warn "$CFG_PROJECT_NAME is installed both as a package and in $INSTALL_DIR; --uninstall removes both"
+  fi
+}
+
+target_present() {
+  case "$1" in
+    pkg:apt:*|pkg:dpkg:*) dpkg-query -W -f='${Status}' "${1##*:}" 2>/dev/null | grep -q 'install ok installed' ;;
+    pkg:*) rpm -q "${1##*:}" >/dev/null 2>&1 ;;
+    *) [ -e "$1" ] || [ -L "$1" ] ;;
+  esac
 }
 
 write_uninstall_manifest() {
-  local tmp
+  local tmp f
   tmp="$CFG_UNINSTALL_MANIFEST.tmp.$$"
   mkdir -p "$(dirname "$CFG_UNINSTALL_MANIFEST")"
-  printf '%s\n' "$INSTALLED_FILES" | jq -R '.' | jq -s \
+  {
+    if [ -f "$CFG_UNINSTALL_MANIFEST" ]; then
+      jq -r '.files[]?' "$CFG_UNINSTALL_MANIFEST" 2>/dev/null | while IFS= read -r f; do
+        if target_present "$f"; then printf '%s\n' "$f"; fi
+      done
+    fi
+    printf '%s\n' "$INSTALLED_FILES"
+  } | jq -R '.' | jq -s \
     --arg project "$CFG_PROJECT_NAME" --arg version "$VERSION" --arg install_dir "$INSTALL_DIR" \
-    '{project:$project, version:$version, install_dir:$install_dir, files:map(select(length>0))}' \
+    '{project:$project, version:$version, install_dir:$install_dir, files:(map(select(length>0)) | unique)}' \
     > "$tmp"
   mv -f "$tmp" "$CFG_UNINSTALL_MANIFEST"
 }
@@ -694,12 +751,13 @@ write_uninstall_manifest() {
 # trusted rm targets.
 safe_remove() {
   case "$1" in
+    "$INSTALL_DIR/$COMMAND_NAME"| \
     "$INSTALL_DIR/$CFG_PROJECT_NAME"| \
     "$HOME/Applications/$CFG_MACOS_BUNDLE_NAME.app"| \
     "$HOME/.local/share/applications/$CFG_PROJECT_NAME.desktop"| \
     "$HOME/.local/share/icons/$CFG_PROJECT_NAME.png"| \
     "$HOME/.local/share/icons/$CFG_PROJECT_NAME.svg")
-      rm -rf -- "$1"; info "removed $1" ;;
+      if [ -e "$1" ] || [ -L "$1" ]; then rm -rf -- "$1"; info "removed $1"; else info "already removed: $1"; fi ;;
     # A mismatch here almost always means install_dir/macos_bundle_name
     # changed since install, not that the manifest was tampered with — but
     # either way, silently treating it as done (and then deleting the
@@ -753,7 +811,7 @@ do_uninstall() {
   [ "$manifest_install_dir" = "$INSTALL_DIR" ] \
     || err "install_dir ('$INSTALL_DIR') differs from what was recorded at install time ('$manifest_install_dir') — uninstall would not find the real files. Re-run without --install-dir, or with the same install_dir used to install."
 
-  confirm "Remove $CFG_PROJECT_NAME ($INSTALL_DIR/$CFG_PROJECT_NAME and related files)?" || err "aborted"
+  confirm "Remove $CFG_PROJECT_NAME ($INSTALL_DIR/$COMMAND_NAME and related files)?" || err "aborted"
 
   # Written to a file rather than piped straight into the loop: a pipeline's
   # exit status is its last command's, so piping jq into a while-read loop would
@@ -765,12 +823,13 @@ do_uninstall() {
   info "removing $CFG_PROJECT_NAME"
   while IFS= read -r f; do
     case "$f" in
-      pkg:*) remove_package "$f" ;;
+      pkg:*) if target_present "$f"; then remove_package "$f"; else info "already removed: ${f##*:}"; fi ;;
       *) safe_remove "$f" ;;
     esac
   done < "$files_list"
 
   rm -f "$CFG_UNINSTALL_MANIFEST"
+  report_leftovers
 
   if [ "$PURGE" -eq 1 ]; then
     confirm "Also remove settings, cache, and data (\$HOME/.config/$CFG_PROJECT_NAME, \$HOME/.cache/$CFG_PROJECT_NAME, \$HOME/.local/share/$CFG_PROJECT_NAME)?" \
@@ -782,7 +841,21 @@ do_uninstall() {
     done
   fi
 
-  info "done. (PATH entry left in your shell rc file — remove manually if desired)"
+  info "done"
+}
+
+report_leftovers() {
+  local rest d p
+  rest="$PATH:"
+  while [ -n "$rest" ]; do
+    d="${rest%%:*}"; rest="${rest#*:}"; p="$d/$COMMAND_NAME"
+    if [ -n "$d" ] && [ -L "$p" ] && [ ! -e "$p" ] && [ "$(readlink "$p")" = "$INSTALL_DIR/$COMMAND_NAME" ]; then
+      warn "$p is a symlink to the removed file; remove it with: $([ -w "$d" ] || printf 'sudo ')rm $p"
+    fi
+  done
+  command_copies | while IFS= read -r p; do
+    warn "'$COMMAND_NAME' is still on PATH: $p (not installed by this installer)"
+  done
 }
 
 main() {
@@ -807,7 +880,10 @@ main() {
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "would install $CFG_PROJECT_NAME $VERSION"
     echo "  asset:   $ASSET_URL"
-    echo "  target:  $INSTALL_DIR"
+    case "$ASSET_URL" in
+      *.deb|*.rpm) echo "  method:  ${ASSET_URL##*.} package" ;;
+      *) echo "  target:  $INSTALL_DIR/$COMMAND_NAME" ;;
+    esac
     exit 0
   fi
 
@@ -818,10 +894,9 @@ main() {
     fetch_pattern_asset
   fi
   install_asset
-  [ "$NEEDS_PATH_UPDATE" -eq 1 ] && update_path
   write_uninstall_manifest
+  report_install
 
-  info "$CFG_PROJECT_NAME $VERSION installed to $INSTALL_DIR"
   if [ -n "$CFG_POST_INSTALL_CMD" ] && ! sh -c "$CFG_POST_INSTALL_CMD"; then
     warn "post-install command failed: $CFG_POST_INSTALL_CMD"
   fi
@@ -835,8 +910,6 @@ main() {
   else
     uninstall_hint="re-run this installer with --uninstall"
   fi
-  echo ""
-  info "Launch $CFG_PROJECT_NAME from your app menu, or run '$CFG_PROJECT_NAME'."
   info "Uninstall: $uninstall_hint"
 }
 
