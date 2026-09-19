@@ -53,7 +53,11 @@ asset directly.
      also what makes uninstall safe: it records the real package identifier, and
      refuses to later remove anything else — even if the uninstall record itself is
      modified.
-   - It registers a `.desktop`/icon entry for AppImage installs.
+   - It registers a `.desktop`/icon entry for AppImage installs, with an absolute
+     `Exec` path, so the app launches from the menu regardless of `PATH`.
+   - It never edits shell startup files. After installing it reports what was
+     installed, where, and whether the command resolves in the current environment —
+     see [Terminal command](#terminal-command).
 
 2. **Each project** (`modrex`, `Refract_MC`, ...) keeps an `install.config.json` in its
    own repo — see the schema below.
@@ -69,6 +73,7 @@ Lives at the root of each project's own repo.
 {
   "schema_version": 1,
   "project_name": "modrex",
+  "command_name": "modrex",
   "github_repo": "modrexio/modrex",
   "manifest_url": "https://github.com/modrexio/modrex/releases/latest/download/latest.json",
   "pubkey": "RWTX2KsFhWADAjKhVxTe/CxS/HT+S3iMqrQorXSP/QUE20RjzISVRUbV",
@@ -76,12 +81,10 @@ Lives at the root of each project's own repo.
     "darwin": "app"
   },
   "macos_bundle_name": "Modrex",
-  "macos_executable_name": "modrex",
   "deb_package_name": "modrex",
   "rpm_package_name": "modrex",
   "install_dir": "$HOME/.local/bin",
-  "add_to_path": true,
-  "post_install_cmd": "modrex --version",
+  "post_install_cmd": "$HOME/.local/bin/modrex --version",
   "uninstall_manifest": "$HOME/.modrex/uninstall.json",
   "install_url": "https://modrex.net/install.sh"
 }
@@ -90,16 +93,17 @@ Lives at the root of each project's own repo.
 | Field | Required | Notes |
 |---|:---:|---|
 | `schema_version` | ![yes](https://img.shields.io/badge/Yes-brightgreen) | Must currently be `1` — the engine hard-errors on anything else |
-| `project_name` | ![yes](https://img.shields.io/badge/Yes-brightgreen) | Used for binary naming, default install/uninstall paths, and log messages. Letters, digits, `.`, `_`, `-` only, and cannot be exactly `.` or `..` — it ends up directly in filesystem paths |
+| `project_name` | ![yes](https://img.shields.io/badge/Yes-brightgreen) | Used for default install/uninstall paths, desktop-entry and icon file names, and log messages. Letters, digits, `.`, `_`, `-` only, and cannot be exactly `.` or `..` — it ends up directly in filesystem paths |
+| `command_name` | ![no](https://img.shields.io/badge/No-red) | The command users type in a terminal (`modrex`, `refract`). Defaults to `project_name`; same character rules. It names the AppImage/macOS symlink in `install_dir` and is what the engine looks up on `PATH` to report availability. Native packages must ship it as `/usr/bin/{command_name}` themselves — the engine reports what a package actually provides, it never renames or aliases |
 | `github_repo` | ![no](https://img.shields.io/badge/No-red) | `owner/repo`. Used to look up `.deb`/`.rpm` assets via the GitHub Releases API when apt/dnf/zypper is detected — without it, Linux package-manager users fall back to the AppImage |
 | `manifest_url` | ![yes](https://img.shields.io/badge/Yes-brightgreen) | Tauri updater manifest URL, normally the `/releases/latest/download/latest.json` alias. Must be `https://` |
 | `pubkey` | ![no](https://img.shields.io/badge/No-red) | The raw minisign public key string (starts with `RW...`), *not* the value stored directly in `tauri.conf.json`'s `plugins.updater.pubkey` — that field is itself base64-encoded content of a full minisign pubkey file (comment line + key line). Decode it once (`echo "$TAURI_PUBKEY" \| base64 -d`) and take only the second line. Once set, the engine requires `minisign` and a valid signature — it refuses to install rather than silently skip verification. Leave unset until the project has real signing configured |
 | `preferred_variant` | ![no](https://img.shields.io/badge/No-red) | Per-OS suffix to prefer when the manifest has multiple platform-key variants for the same OS/arch (e.g. `linux-x86_64-deb` vs `linux-x86_64-appimage`). Takes priority over `.deb`/`.rpm` discovery via `github_repo` |
 | `macos_bundle_name` | ![no](https://img.shields.io/badge/No-red) | The `.app` bundle's actual name (e.g. `Modrex`, not `modrex`) if it differs from `project_name`. Defaults to `project_name`. Uninstall only ever removes `$HOME/Applications/{macos_bundle_name}.app` exactly — never a wildcard — so this must match the real bundle name or uninstall won't find it |
-| `macos_executable_name` | ![no](https://img.shields.io/badge/No-red) | The name of the actual executable inside `Contents/MacOS/` in the `.app` bundle, if it differs from `project_name`. Defaults to `project_name`. Install fails with a clear error if it's wrong, rather than creating a symlink to a file that doesn't exist |
+| `macos_executable_name` | ![no](https://img.shields.io/badge/No-red) | Override for the executable inside `Contents/MacOS/`. Normally unnecessary: the engine reads `CFBundleExecutable` from the bundle's `Info.plist`. Kept for configs written before that; slated for removal in the next major (see [docs/planned-breaking-changes.md](docs/planned-breaking-changes.md)) |
 | `deb_package_name`, `rpm_package_name` | ![no](https://img.shields.io/badge/No-red) | The real `Package`/`Name` identifier inside the built `.deb`/`.rpm`, if it differs from `project_name`. Defaults to `project_name`. See [why these exist](#why-deb_package_name-and-rpm_package_name-exist) below |
 | `install_dir` | ![yes](https://img.shields.io/badge/Yes-brightgreen) | Must be an absolute path or start with the literal string `$HOME/`, e.g. `$HOME/.local/bin`. Restricted to `A-Za-z0-9_./+-` — see [why the character set is restricted](#why-install_dir-is-character-restricted) below |
-| `add_to_path` | ![no](https://img.shields.io/badge/No-red) | Default `true`. Never applied after a `.deb`/`.rpm` install, since the package manager already puts the binary on the system `PATH` |
+| `add_to_path` | ![no](https://img.shields.io/badge/No-red) | Deprecated. Accepted and ignored: the engine no longer edits shell startup files (see [Terminal command](#terminal-command)). Slated for removal in the next major |
 | `post_install_cmd` | ![no](https://img.shields.io/badge/No-red) | A trusted shell command run via `sh -c` after install; a non-zero exit is a warning, not fatal. This is executable code, not data — only trusted project maintainers should set it, same trust level as the project's build pipeline or signing key |
 | `uninstall_manifest` | ![no](https://img.shields.io/badge/No-red) | Defaults to `$HOME/.{project_name}/uninstall.json`. Same `$HOME/...`-or-absolute-path rule as `install_dir`, but *does* allow colons — this path is never inserted into `PATH` |
 | `install_url` | ![no](https://img.shields.io/badge/No-red) | The project's own public install URL (e.g. `https://modrex.net/install.sh`). Used only to print an accurate `curl \| sh -s -- --uninstall` hint after a successful install. Without it, the hint falls back to `sh $0 --uninstall`, which only makes sense when run from a local file, not piped from curl |
@@ -124,17 +128,46 @@ an arbitrary one.
 <details>
 <summary><b>Why <code>install_dir</code> is character-restricted</b></summary>
 
-No spaces, no shell metacharacters, and notably no colon:
-
-- This value is inserted directly into `PATH`. An embedded `:` would silently create a
-  second, non-absolute (hijackable) `PATH` entry.
-- It's also written into a line appended to the user's shell rc file. An unrestricted
-  value could otherwise plant a `$(...)` command that runs the next time they open a
-  shell.
+No spaces, no shell metacharacters, and notably no colon: the value is printed back to
+the user as part of a `PATH` suggestion and a `ln -s` command they may copy into their
+shell. An unrestricted value could plant a `$(...)` command or split into a second,
+non-absolute `PATH` entry.
 
 Config is never `eval`'d — only `$HOME/...` and absolute paths are accepted.
 
 </details>
+
+## Terminal command
+
+The engine does not detect the user's shell and does not edit `.profile`, `.bashrc`,
+`.zshrc`, fish configuration, or any other startup file. No portable, root-free way
+exists to put a user directory on the `PATH` of every future terminal: the XDG spec only
+says distributions *should* add `~/.local/bin`, and they do so per shell and per distro
+(Debian/Ubuntu: bash login shells, only once the directory exists; Fedora: bash and zsh;
+Arch: not at all). Pretending otherwise produced installs that silently did not work.
+
+Instead the engine reports observed facts after every install:
+
+- native package (`.deb`/`.rpm`): the package name, version, manager, and the
+  executables it actually placed in `/usr/bin`. If the package does not provide
+  `command_name`, that is stated — the engine never renames or aliases anything;
+  packaging is the project's job (see [Consumer packaging check](#consumer-packaging-check)).
+- AppImage/macOS: the exact installed path (`{install_dir}/{command_name}`), then
+  exactly one of:
+  - `'{command_name}' is available in this terminal` — it resolves to the file just
+    installed;
+  - `'{command_name}' currently runs <other path>` — another copy shadows it;
+  - `'{command_name}' is not on your PATH in this terminal` — followed by the options:
+    launch from the application menu (the `.desktop` entry uses the absolute path), add
+    `{install_dir}` to your own shell's `PATH`, or expose it system-wide with
+    `sudo ln -s {install_dir}/{command_name} /usr/local/bin/{command_name}`.
+    `/usr/local/bin` is on the default `PATH` of every distribution and macOS, for every
+    shell and session type; `ln -s` fails rather than overwriting an existing file. The
+    engine prints this command, it never runs it.
+- any other `{command_name}` on the current `PATH`, tagged as recorded by this installer
+  or not.
+
+Nothing is claimed about future terminals, because nothing about them can be observed.
 
 ## Known limitations
 
@@ -149,8 +182,8 @@ Config is never `eval`'d — only `$HOME/...` and absolute paths are accepted.
   artifact the maintainer actually intended to release.
 - The GitHub Releases API is unauthenticated and rate-limited to 60 requests/hour per
   IP — fine for individual installs, but worth knowing.
-- PATH entries added to a shell rc file are left behind on uninstall; remove them
-  manually if desired.
+- Lines that earlier engine releases appended to shell rc files are left in place; they
+  are harmless and no longer written.
 
 ## Worker integration
 
@@ -159,8 +192,15 @@ Each project's Worker does three things:
 1. Resolve an **engine pin** to a real tag of this repo's `install.sh` (never `@main`,
    so a bad push here can't break every project's install at once).
 2. Fetch that project's `install.config.json`.
-3. Concatenate them, with the config flattened into `CFG_*` exports ahead of the engine
-   body, and stream the result to `curl | sh`.
+3. Concatenate them, with the config flattened into `CFG_*` assignments ahead of the
+   engine body, and stream the result to `curl | sh`.
+
+The flattening is generic: every top-level key matching `^[a-z][a-z0-9_]*$` whose value
+is a string, number, or boolean becomes `CFG_<KEY UPPERCASED>=<quoted value>`; booleans
+become `true`/`false`; `preferred_variant` (an object) is flattened to space-separated
+`os:variant` pairs; anything else is skipped. Keep no list of field names in the
+bootstrap — the engine ignores `CFG_*` it does not know, so new optional fields work
+the day the engine supports them, and old engines keep working with new configs.
 
 ### Engine pin modes
 
@@ -182,7 +222,9 @@ you.
 
 This only holds if mget's own SemVer discipline (major = breaking, minor = new
 capability, patch = fix) is actually followed — see [CI](#ci) for the automated check
-that catches the most common way that discipline slips.
+that catches the most common way that discipline slips. Changes that are deliberately
+held back for the next major are listed in
+[docs/planned-breaking-changes.md](docs/planned-breaking-changes.md).
 
 The two API-resolved forms add a third fetch (GitHub tags/releases API) on top of the
 two the Worker already makes, subject to the same 60 req/hour/IP limit noted above.
@@ -202,35 +244,21 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
 }
 
-// preferred_variant is a nested object in the config but a flat
-// "os:variant os:variant" string in the engine's CFG_PREFERRED_VARIANT —
-// flatten it explicitly, don't pass the object straight through
-// (Object.entries + template-literal stringification silently produces
-// the literal text "[object Object]").
-const flatConfig = {
-  schema_version: config.schema_version,
-  project_name: config.project_name,
-  github_repo: config.github_repo ?? "",
-  manifest_url: config.manifest_url,
-  pubkey: config.pubkey ?? "",
-  preferred_variant: Object.entries(config.preferred_variant ?? {})
-    .map(([os, variant]) => `${os}:${variant}`)
-    .join(" "),
-  macos_bundle_name: config.macos_bundle_name ?? "",
-  macos_executable_name: config.macos_executable_name ?? "",
-  deb_package_name: config.deb_package_name ?? "",
-  rpm_package_name: config.rpm_package_name ?? "",
-  install_dir: config.install_dir,
-  add_to_path: config.add_to_path ?? true,
-  post_install_cmd: config.post_install_cmd ?? "",
-  uninstall_manifest: config.uninstall_manifest ?? "",
-  install_url: config.install_url ?? "",
-};
-
-const prelude = Object.entries(flatConfig)
+const prelude = Object.entries(config)
+  .filter(([key]) => /^[a-z][a-z0-9_]*$/.test(key))
+  .map(([key, value]) =>
+    key === "preferred_variant" && value && typeof value === "object"
+      ? [key, Object.entries(value).map(([os, v]) => `${os}:${v}`).join(" ")]
+      : [key, value]
+  )
+  .filter(([, value]) => ["string", "number", "boolean"].includes(typeof value))
   .map(([key, value]) => `CFG_${key.toUpperCase()}=${shellQuote(value)}`)
   .join("\n");
 ```
+
+A static-hosting bootstrap without a Worker can do the same with `jq` on the client
+(`@sh` produces the single-quoted literal) and pipe the prelude plus the engine into
+`sh -s -- "$@"`.
 
 ## CI
 
@@ -238,6 +266,13 @@ const prelude = Object.entries(flatConfig)
   `cfg-interface-diff`, which compares the set of `CFG_*` variables the script reads
   against the last tagged release and fails if any disappeared — the most common
   accidental-breaking-change shape for a config-driven script like this one.
+- **Every push** also runs `tests/run.sh` on Ubuntu (apt) and in a Fedora container
+  (dnf), against the real modrex release and a pinned Refract release: it proves no
+  shell startup file is ever modified, that availability/shadowing/leftover reporting
+  matches the environment, that recorded installs accumulate and uninstall together,
+  that manifests written by earlier releases still uninstall, that a package lacking
+  `command_name` is reported rather than rejected, and that `sudo` is refused and
+  `--dry-run` never prompts.
 - **Tag pushes** additionally run full install+uninstall integration tests against
   modrex's real release:
   - one forcing the AppImage path
@@ -249,6 +284,24 @@ const prelude = Object.entries(flatConfig)
 None of this proves a change is *intentionally* non-breaking — that's still a human
 call when deciding the version bump — but it catches accidental regressions before a
 tag becomes eligible for `v1`/`latest` auto-pickup.
+
+### Consumer packaging check
+
+`tests/check-consumer.sh <owner/repo> <command_name> [tag]` downloads a release's
+Linux and macOS artifacts and fails unless every `.deb`, `.rpm`, `.AppImage` and
+`.app.tar.gz` contains the executable named `command_name`. mget's CI runs it against
+each consumer's latest release; a consumer can run the same check in its own release
+workflow:
+
+```yaml
+jobs:
+  packaging:
+    uses: modrexio/mget/.github/workflows/consumer-check.yml@main
+    with:
+      repo: ${{ github.repository }}
+      command_name: refract
+      tag: ${{ github.ref_name }}
+```
 
 ## Usage
 
@@ -271,6 +324,15 @@ curl -fsSL <project-install-url> | sh -s -- --uninstall -y
   `$HOME/.cache/{project_name}`, and `$HOME/.local/share/{project_name}`. The default
   uninstall only removes what mget itself installed, leaving user settings/cache/data
   in place.
+- Installing a second format (say the AppImage after the `.deb`) keeps both: the engine
+  records every install it makes, warns that both exist and which one the current
+  `PATH` runs, and removes all of them on `--uninstall`. It never removes a copy it did
+  not install; after uninstalling it lists any `{command_name}` still on `PATH`, and a
+  `/usr/local/bin/{command_name}` symlink left pointing at the removed file, with the
+  command to remove it.
+- Running the installer under `sudo` is refused before anything is downloaded: it would
+  install into root's home. Run it as yourself; it asks for `sudo` only when a package
+  manager needs it. A real root account (no `SUDO_USER`) is accepted.
 - **`-y`/`--yes`** skips both the install-time native-vs-AppImage prompt (defaulting to
   the native package) and the uninstall confirmation prompt. Both prompts read from
   `/dev/tty` directly, since stdin is the piped script source in the normal `curl | sh`
@@ -278,8 +340,10 @@ curl -fsSL <project-install-url> | sh -s -- --uninstall -y
   with no controlling terminal — it refuses rather than guessing; the install-time prompt
   instead just defaults to the native package in that case, so a plain `curl | sh` in a
   script or CI never hangs.
-- A successful install prints a launch hint and, when the project sets `install_url` in
-  its config, an accurate copy-pasteable uninstall command.
+- `--dry-run` never prompts; it takes the native default where a prompt would appear.
+- A successful install prints the [terminal command report](#terminal-command) and,
+  when the project sets `install_url` in its config, an accurate copy-pasteable
+  uninstall command.
 
 ### How uninstall stays safe
 
@@ -293,11 +357,14 @@ per-project) and validates it before touching anything:
 - For `.deb`/`.rpm` installs, removal is restricted to the configured
   `deb_package_name`/`rpm_package_name` (defaulting to `project_name`), via the same
   package manager used to install it.
+- Entries whose target is already gone are skipped, not errors. Each install prunes
+  such entries and merges its own, so the file always lists every mget-owned install
+  that still exists.
 
 Uninstall requires the same `install.config.json` that was used to install. If that
-config disappears, or changes `project_name`, `install_dir`, `macos_bundle_name`,
-`deb_package_name`, or `rpm_package_name`, uninstall may refuse to proceed rather than
-guess.
+config disappears, or changes `project_name`, `command_name`, `install_dir`,
+`macos_bundle_name`, `deb_package_name`, or `rpm_package_name`, uninstall may refuse to
+proceed rather than guess.
 
 ## Local testing
 
@@ -311,3 +378,7 @@ CFG_MANIFEST_URL=https://github.com/modrexio/modrex/releases/latest/download/lat
 CFG_INSTALL_DIR='$HOME/.local/bin' \
 sh install.sh --dry-run
 ```
+
+`sh tests/run.sh` runs the behaviour tests (needs `jq`, `minisign`, network access,
+and either apt with passwordless `sudo` or dnf as root; each case uses a throwaway
+`HOME`). `TESTS="t_sudo_is_refused_before_network"` selects individual cases.
