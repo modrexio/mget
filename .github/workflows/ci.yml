@@ -51,6 +51,56 @@ jobs:
           fi
           echo "no CFG_* variables were removed since $prev_tag"
 
+  tests:
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq minisign
+      - run: sh tests/run.sh
+
+  tests-fedora:
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install deps
+        run: dnf install -y curl jq minisign
+      - run: sh tests/run.sh
+
+  modrex-packaging:
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq rpm
+      - run: sh tests/check-consumer.sh modrexio/modrex modrex
+
+  refract-packaging:
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq rpm
+      - run: sh tests/check-consumer.sh RefractMC/Refract_MC refract
+
   # Pin the known unsigned Refract release so a future signed latest release
   # does not stop exercising mget's local ad-hoc signing path.
   macos-integration:
@@ -63,9 +113,7 @@ jobs:
       CFG_MANIFEST_URL: https://github.com/RefractMC/Refract_MC/releases/download/v1.2.0/latest.json
       CFG_PUBKEY: RWQkukf1kBwQ/86ivJEv75SqjTY69a/ygF8HPb9ZXNwQoi+A2L/dY875
       CFG_MACOS_BUNDLE_NAME: Refract
-      CFG_MACOS_EXECUTABLE_NAME: refract-tauri
       CFG_INSTALL_DIR: $HOME/.local/bin
-      CFG_ADD_TO_PATH: 'false'
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -77,6 +125,7 @@ jobs:
           app="$HOME/Applications/Refract.app"
           test -x "$app/Contents/MacOS/refract-tauri"
           test -L "$HOME/.local/bin/refract"
+          test "$(readlink "$HOME/.local/bin/refract")" = "$app/Contents/MacOS/refract-tauri"
           codesign --verify --deep --strict "$app"
           codesign --display --verbose=2 "$app" 2>&1 | grep -q 'Signature=adhoc'
       - name: Uninstall
