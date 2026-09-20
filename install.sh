@@ -139,15 +139,64 @@ err()  { [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && printf '\033[1;31merror:\033[0m %
 have() { command -v "$1" >/dev/null 2>&1; }
 
 have curl || err "curl is required"
-have jq   || err "jq is required (e.g. 'apt install jq' / 'brew install jq')"
+[ -z "$CFG_PUBKEY" ] || have base64 || err "base64 is required for signature verification"
 
-# Signature verification tools are checked here rather than at their point of
-# use in verify_signature(), which runs only after the asset is fully
-# downloaded — failing there wastes a download on a problem knowable upfront.
-if [ -n "$CFG_PUBKEY" ]; then
-  have minisign || err "minisign is required to verify $CFG_PROJECT_NAME's signature (e.g. 'pacman -S minisign' / 'apt install minisign' / 'dnf install minisign' / 'brew install minisign')"
-  have base64   || err "base64 is required for signature verification"
-fi
+# Flattens a JSON document to one "path<TAB>value" line per scalar, arrays
+# indexed numerically. Deliberately narrow: only \" \\ \/ are decoded, every
+# other escape (\n \t \uXXXX ...) is kept as its escaped text, and raw control
+# characters are rejected, so a value can never contain a newline or a tab and
+# forge another line or split a path. Keys are joined with "." — the paths the
+# engine looks up never contain one. Malformed or truncated input exits 2.
+json_flat() {
+  awk '
+    function ws() { while (substr(s, i, 1) ~ /[ \t\r\n]/) i++ }
+    function str(   c, r) {
+      i++; r = ""
+      while ((c = substr(s, i, 1)) != "\"") {
+        if (c == "" || c ~ /[\001-\037]/) exit 2
+        if (c == "\\") {
+          i++; c = substr(s, i, 1)
+          if (c == "u") {
+            if (substr(s, i + 1, 4) !~ /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/) exit 2
+            c = "\\u" substr(s, i + 1, 4); i += 4
+          } else if (c ~ /^[bfnrt]$/) c = "\\" c
+          else if (c != "\"" && c != "\\" && c != "/") exit 2
+        }
+        r = r c; i++
+      }
+      i++; return r
+    }
+    function val(p,   c, k, n) {
+      ws(); c = substr(s, i, 1)
+      if (c == "{") {
+        i++; ws()
+        while (substr(s, i, 1) != "}") {
+          if (substr(s, i, 1) != "\"") exit 2
+          k = str(); ws(); if (substr(s, i, 1) != ":") exit 2
+          i++; val(p == "" ? k : p "." k); ws()
+          if (substr(s, i, 1) == ",") { i++; ws(); if (substr(s, i, 1) == "}") exit 2 } else if (substr(s, i, 1) != "}") exit 2
+        }
+        i++
+      } else if (c == "[") {
+        i++; n = 0; ws()
+        while (substr(s, i, 1) != "]") {
+          val(p "." n); n++; ws()
+          if (substr(s, i, 1) == ",") { i++; ws(); if (substr(s, i, 1) == "]") exit 2 } else if (substr(s, i, 1) != "]") exit 2
+        }
+        i++
+      } else if (c == "\"") print p "\t" str()
+      else {
+        n = ""; while (substr(s, i, 1) ~ /[-+.0-9A-Za-z]/) { n = n substr(s, i, 1); i++ }
+        if (n !~ /^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?)$/) exit 2
+        print p "\t" n
+      }
+    }
+    { s = s $0 "\n" }
+    END { i = 1; val(""); ws(); if (i <= length(s)) exit 2 }
+  ' "$1"
+}
+
+flat_get() { awk -F '\t' -v k="$2" '$1 == k { v = substr($0, length(k) + 2); f = 1 } END { if (f) print v }' "$1"; }
 
 # In the common curl-pipe-to-sh invocation, fd 0 (stdin) is the piped script
 # source, not the terminal — reading a prompt from it would consume script
@@ -255,10 +304,11 @@ fetch_manifest() {
   info "fetching release manifest"
   curl_download "$CFG_MANIFEST_URL" "$WORK_DIR/manifest.json" \
     || err "failed to fetch $CFG_MANIFEST_URL"
+  json_flat "$WORK_DIR/manifest.json" > "$WORK_DIR/manifest.flat" \
+    || err "release manifest is not valid JSON: $CFG_MANIFEST_URL"
 }
 
-json_get() { jq -r ".$1" "$WORK_DIR/manifest.json"; }
-platform_field() { jq -r ".platforms[\"$1\"].$2 // empty" "$WORK_DIR/manifest.json"; }
+platform_field() { flat_get "$WORK_DIR/manifest.flat" "platforms.$1.$2"; }
 
 # Tauri's bare {os}-{arch} key is the AppImage, but a project that publishes
 # per-format variants (…-deb/…-rpm/…-appimage) may omit the bare key entirely.
@@ -285,12 +335,7 @@ preferred_variant_for() {
 # -L alone only means "follow redirects," not "stay on https," so a github.com
 # URL that happened to redirect to plain http would otherwise be followed.
 curl_download() {
-  local url out
-  url="$1"; out="$2"; shift 2
-  case "$url" in
-    https://api.github.com/*) set -- ${GITHUB_TOKEN:+-H} ${GITHUB_TOKEN:+"Authorization: Bearer $GITHUB_TOKEN"} ;;
-  esac
-  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --retry 2 "$@" "$url" -o "$out"
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --retry 2 "$1" -o "$2"
 }
 
 # Same as curl_download but with visible progress — for the actual asset
@@ -302,76 +347,36 @@ curl_download_progress() {
   curl -fL --proto '=https' --proto-redir '=https' --connect-timeout 10 --retry 2 --progress-bar "$1" -o "$2"
 }
 
-# Looks up the actual asset list from the GitHub Releases API rather than
-# guessing a filename convention — a bundler/packaging change just changes
-# what's in this list, nothing to keep in sync by hand. Cached in WORK_DIR so
-# repeated lookups (deb, then rpm) don't refetch.
-fetch_github_release() {
-  [ -z "${GH_RELEASE_FETCHED:-}" ] || return 0
-  [ -n "$CFG_GITHUB_REPO" ] || return 1
-  curl_download "https://api.github.com/repos/$CFG_GITHUB_REPO/releases/latest" "$WORK_DIR/gh_release.json" \
-    || { warn "failed to query GitHub releases API for $CFG_GITHUB_REPO"; return 1; }
-  GH_RELEASE_FETCHED=1
-}
-
-# Release asset whose filename ends in ".$1" (e.g. "deb", "rpm"). Among
-# multiple matches (a project shipping separate amd64/arm64 packages),
-# prefers one whose filename mentions this machine's architecture; falls
-# back to the first match if none do. check_package_arch, run after
-# download, remains the actual authority — this is just picking a sane
-# candidate to try first, not a substitute for that check.
-find_gh_asset_url() {
-  local ext arch_pattern
-  ext="$1"
-  case "$ARCH" in
-    x86_64) arch_pattern="x86_64|amd64|x64" ;;
-    aarch64) arch_pattern="aarch64|arm64" ;;
-  esac
-  jq -r --arg ext ".$ext" --arg re "$arch_pattern" '
-    [.assets[] | select(.name | endswith($ext))] as $cands
-    | ($cands | map(select(.name | test($re; "i")))[0].browser_download_url) as $matched
-    | if $matched then $matched else ($cands[0].browser_download_url // empty) end
-  ' "$WORK_DIR/gh_release.json"
-}
-
 # Resolves a --appimage/--deb/--rpm flag directly, bypassing all
 # auto-detection (and the interactive prompt) since the user already
 # answered the question on the command line.
 resolve_forced_format() {
-  local base_key ext url
+  local base_key
   base_key="$1"
   case "$FORCE_FORMAT" in
     appimage)
       [ "$OS" = linux ] || err "--appimage is only meaningful on Linux"
       ASSET_KEY=$(appimage_key "$base_key")
       [ -n "$ASSET_KEY" ] || err "no AppImage asset published for $base_key"
-      ASSET_SOURCE=manifest
       ;;
     deb|rpm)
       [ "$OS" = linux ] || err "--$FORCE_FORMAT is only meaningful on Linux"
-      ext="$FORCE_FORMAT"
-      if fetch_github_release; then
-        url=$(find_gh_asset_url "$ext")
-        [ -n "$url" ] && { ASSET_SOURCE=pattern; ASSET_URL="$url"; return; }
-      fi
-      if [ -n "$(platform_field "${base_key}-${ext}" url)" ]; then
-        ASSET_SOURCE=manifest; ASSET_KEY="${base_key}-${ext}"; return
-      fi
-      err "no .$ext asset found for $CFG_PROJECT_NAME (checked GitHub release assets and manifest key '${base_key}-${ext}')"
+      ASSET_KEY="${base_key}-${FORCE_FORMAT}"
+      [ -n "$(platform_field "$ASSET_KEY" url)" ] || err "no .$FORCE_FORMAT asset published for $CFG_PROJECT_NAME (manifest key '$ASSET_KEY')"
       ;;
   esac
 }
 
 # Precedence: an explicit --appimage/--deb/--rpm flag wins outright; then an
 # explicit preferred_variant manifest key; then, on Linux with a detected
-# package manager, a matching .deb/.rpm asset discovered via the GitHub
-# Releases API or a manifest key — offered interactively against the AppImage
-# alternative when both exist (see choose_variant); then the bare {os}-{arch}
-# manifest key (AppImage on Linux, .app on macOS).
+# package manager, the manifest's .deb/.rpm key — offered interactively
+# against the AppImage alternative when both exist (see choose_variant); then
+# the bare {os}-{arch} manifest key (AppImage on Linux, .app on macOS). The
+# manifest is the only source of assets: a package it does not declare is not
+# installed.
 resolve_asset_source() {
-  local base_key variant url
+  local base_key variant ext
   base_key="${OS}-${ARCH}"
-  ASSET_SOURCE=""
 
   if [ -n "$FORCE_FORMAT" ]; then
     resolve_forced_format "$base_key"
@@ -380,50 +385,21 @@ resolve_asset_source() {
 
   variant=$(preferred_variant_for "$OS")
   if [ -n "$variant" ] && [ -n "$(platform_field "${base_key}-${variant}" url)" ]; then
-    ASSET_SOURCE=manifest; ASSET_KEY="${base_key}-${variant}"; return
+    ASSET_KEY="${base_key}-${variant}"; return
   fi
   # Tauri's bare Linux key is the AppImage. Honor an explicit AppImage
   # preference before native package discovery when no suffixed alias exists.
   if [ "$OS:$variant" = "linux:appimage" ] && [ -n "$(platform_field "$base_key" url)" ]; then
-    ASSET_SOURCE=manifest; ASSET_KEY="$base_key"; return
+    ASSET_KEY="$base_key"; return
   fi
 
-  if [ "$OS" = linux ]; then
-    case "$PKG_MANAGER" in
-      apt)
-        if fetch_github_release; then
-          url=$(find_gh_asset_url deb)
-          if [ -n "$url" ]; then
-            maybe_prefer_appimage "$base_key" deb apt \
-              && { ASSET_SOURCE=manifest; ASSET_KEY="$APPIMAGE_KEY"; return; }
-            ASSET_SOURCE=pattern; ASSET_URL="$url"; return
-          fi
-        fi
-        if [ -n "$(platform_field "${base_key}-deb" url)" ]; then
-          maybe_prefer_appimage "$base_key" deb apt \
-            && { ASSET_SOURCE=manifest; ASSET_KEY="$APPIMAGE_KEY"; return; }
-          ASSET_SOURCE=manifest; ASSET_KEY="${base_key}-deb"; return
-        fi
-        ;;
-      dnf|zypper)
-        if fetch_github_release; then
-          url=$(find_gh_asset_url rpm)
-          if [ -n "$url" ]; then
-            maybe_prefer_appimage "$base_key" rpm "$PKG_MANAGER" \
-              && { ASSET_SOURCE=manifest; ASSET_KEY="$APPIMAGE_KEY"; return; }
-            ASSET_SOURCE=pattern; ASSET_URL="$url"; return
-          fi
-        fi
-        if [ -n "$(platform_field "${base_key}-rpm" url)" ]; then
-          maybe_prefer_appimage "$base_key" rpm "$PKG_MANAGER" \
-            && { ASSET_SOURCE=manifest; ASSET_KEY="$APPIMAGE_KEY"; return; }
-          ASSET_SOURCE=manifest; ASSET_KEY="${base_key}-rpm"; return
-        fi
-        ;;
-    esac
+  case "$PKG_MANAGER" in apt) ext=deb ;; dnf|zypper) ext=rpm ;; *) ext="" ;; esac
+  if [ -n "$ext" ] && [ -n "$(platform_field "${base_key}-${ext}" url)" ]; then
+    if maybe_prefer_appimage "$base_key" "$ext" "$PKG_MANAGER"; then ASSET_KEY="$APPIMAGE_KEY"; else ASSET_KEY="${base_key}-${ext}"; fi
+    return
   fi
 
-  ASSET_SOURCE=manifest; ASSET_KEY="$base_key"
+  ASSET_KEY="$base_key"
   if [ "$OS" = linux ]; then
     variant=$(appimage_key "$base_key")
     if [ -n "$variant" ]; then
@@ -445,15 +421,25 @@ download_asset() {
   curl_download_progress "$ASSET_URL" "$ASSET_FILE" || err "download failed: $ASSET_URL"
 }
 
-# .deb/.rpm assets found via the GitHub API aren't part of the signed Tauri
-# updater manifest, so there's nothing to verify them against.
-fetch_pattern_asset() {
-  case "$ASSET_URL" in https://*) ;; *) err "asset URL is not https: $ASSET_URL" ;; esac
-  ASSET_FILE="$WORK_DIR/$(basename "${ASSET_URL%%\?*}")"
-  info "downloading $(basename "$ASSET_FILE")"
-  curl_download_progress "$ASSET_URL" "$ASSET_FILE" \
-    || err "download failed: $ASSET_URL (does this release actually publish this asset?)"
-  warn "no manifest signature available for this asset — verifying via HTTPS only"
+# Runs before anything is downloaded: a missing verifier is knowable upfront,
+# and installing it needs the same consent and sudo the native package path
+# already asks for. Nothing is installed without the prompt (or -y).
+ensure_minisign() {
+  local install
+  [ -n "$CFG_PUBKEY" ] && [ "$DRY_RUN" -eq 0 ] || return 0
+  have minisign && return 0
+  case "$PKG_MANAGER" in
+    apt) install="apt-get install -y minisign" ;;
+    dnf) install="dnf install -y minisign" ;;
+    zypper) install="zypper --non-interactive install minisign" ;;
+    *) if have pacman; then install="pacman -S --noconfirm minisign"; elif have brew; then install="brew install minisign"; else install=""; fi ;;
+  esac
+  [ -n "$install" ] || err "minisign is required to verify $CFG_PROJECT_NAME's signature (e.g. 'apt install minisign' / 'dnf install minisign' / 'pacman -S minisign' / 'brew install minisign')"
+  info "minisign is required to verify $CFG_PROJECT_NAME's signature; it can be installed with: $install"
+  confirm "Install minisign now?" || err "minisign is required to verify $CFG_PROJECT_NAME's signature — install it and re-run"
+  case "$install" in brew*) ;; *) require_sudo ;; esac
+  $SUDO $install || err "installing minisign failed — install it manually and re-run"
+  have minisign || err "minisign is still not on PATH after installation — install it manually and re-run"
 }
 
 verify_signature() {
@@ -461,10 +447,8 @@ verify_signature() {
     warn "no pubkey configured — skipping signature verification"
     return
   fi
-  have minisign || err "a pubkey is configured but minisign is not installed — refusing to install unverified"
   [ -n "$ASSET_SIG" ] || err "release manifest has no signature for this asset"
 
-  have base64 || err "base64 is required for signature verification"
   printf '%s' "$ASSET_SIG" | base64 -d > "$ASSET_FILE.minisig" 2>/dev/null \
     || err "invalid base64 signature in updater manifest"
   minisign -V -P "$CFG_PUBKEY" -m "$ASSET_FILE" -x "$ASSET_FILE.minisig" \
@@ -520,11 +504,10 @@ check_package_arch() {
   esac
 }
 
-# The GitHub-discovered .deb/.rpm comes from a separate API call than the
-# Tauri updater manifest VERSION was read from — normally the same release,
-# but not cross-checked by construction. A loose prefix match (rather than
-# exact) tolerates rpm's "-1" release suffixes and similar formatting that
-# don't indicate an actual version mismatch.
+# The package's own version is compared with the manifest's: a mismatch means
+# the manifest points at a package from another release. A loose prefix match
+# (rather than exact) tolerates rpm's "-1" release suffixes and similar
+# formatting that don't indicate an actual version mismatch.
 check_package_version() {
   local pkg_version
   pkg_version="$1"
@@ -685,13 +668,20 @@ command_copies() {
   done
 }
 
+load_record() {
+  : > "$WORK_DIR/record.flat"
+  [ -f "$CFG_UNINSTALL_MANIFEST" ] || return 0
+  json_flat "$CFG_UNINSTALL_MANIFEST" > "$WORK_DIR/record.flat" || { : > "$WORK_DIR/record.flat"; return 1; }
+}
+record_get() { flat_get "$WORK_DIR/record.flat" "$1"; }
+recorded_files() { awk -F '\t' '$1 ~ /^files\.[0-9]+$/ { print substr($0, index($0, "\t") + 1) }' "$WORK_DIR/record.flat"; }
+
 recorded() {
   local owner
-  [ -f "$CFG_UNINSTALL_MANIFEST" ] || return 1
+  recorded_files | grep -qxF -- "$1" && return 0
   owner=$(dpkg -S "$1" 2>/dev/null | sed 's/[,:].*//' | head -n 1)
   [ -n "$owner" ] || owner=$(rpm -qf --queryformat '%{NAME}' "$1" 2>/dev/null || true)
-  jq -e --arg p "$1" --arg o "${owner:-/}" '(.files | index($p)) != null or (.files | any(endswith(":" + $o)))' \
-    "$CFG_UNINSTALL_MANIFEST" >/dev/null 2>&1
+  [ -n "$owner" ] && recorded_files | sed -n 's/^pkg:[a-z]*://p' | grep -qxF -- "$owner"
 }
 
 owner_label() {
@@ -721,7 +711,7 @@ report_install() {
     [ -n "$INSTALLED_PATH" ] && [ "$p" -ef "$INSTALLED_PATH" ] && continue
     warn "another '$COMMAND_NAME' is on PATH: $p ($(owner_label "$p"))"
   done
-  if jq -e '(.files | any(startswith("pkg:"))) and (.files | any(startswith("/")))' "$CFG_UNINSTALL_MANIFEST" >/dev/null 2>&1; then
+  if recorded_files | grep -q '^pkg:' && recorded_files | grep -q '^/'; then
     warn "$CFG_PROJECT_NAME is installed both as a package and in $INSTALL_DIR; --uninstall removes both"
   fi
 }
@@ -734,22 +724,32 @@ target_present() {
   esac
 }
 
+json_string() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+
 write_uninstall_manifest() {
-  local tmp f
+  local tmp f sep
   tmp="$CFG_UNINSTALL_MANIFEST.tmp.$$"
   mkdir -p "$(dirname "$CFG_UNINSTALL_MANIFEST")"
+  load_record || true
   {
-    if jq -e --arg p "$CFG_PROJECT_NAME" --arg d "$INSTALL_DIR" '.project == $p and .install_dir == $d' "$CFG_UNINSTALL_MANIFEST" >/dev/null 2>&1; then
-      jq -r '.files[]?' "$CFG_UNINSTALL_MANIFEST" | while IFS= read -r f; do
+    if [ "$(record_get project)" = "$CFG_PROJECT_NAME" ] && [ "$(record_get install_dir)" = "$INSTALL_DIR" ]; then
+      recorded_files | while IFS= read -r f; do
         if target_present "$f"; then printf '%s\n' "$f"; fi
       done
     fi
     printf '%s\n' "$INSTALLED_FILES"
-  } | jq -R '.' | jq -s \
-    --arg project "$CFG_PROJECT_NAME" --arg version "$VERSION" --arg install_dir "$INSTALL_DIR" \
-    '{project:$project, version:$version, install_dir:$install_dir, files:(map(select(length>0)) | unique)}' \
-    > "$tmp"
+  } | grep -v '^$' | sort -u > "$tmp.files"
+  ! LC_ALL=C grep -q '[[:cntrl:]]' "$tmp.files" || err "cannot record a path containing control characters"
+  {
+    printf '{"project":%s,"version":%s,"install_dir":%s,"files":[' \
+      "$(json_string "$CFG_PROJECT_NAME")" "$(json_string "$VERSION")" "$(json_string "$INSTALL_DIR")"
+    sep=""
+    while IFS= read -r f; do printf '%s%s' "$sep" "$(json_string "$f")"; sep=","; done < "$tmp.files"
+    printf ']}\n'
+  } > "$tmp"
+  rm -f "$tmp.files"
   mv -f "$tmp" "$CFG_UNINSTALL_MANIFEST"
+  load_record
 }
 
 # Exact matches only — every path this script can ever install to is a fixed,
@@ -806,28 +806,24 @@ remove_package() {
 do_uninstall() {
   local manifest_project manifest_install_dir files_list
   [ -f "$CFG_UNINSTALL_MANIFEST" ] || err "no install record found at $CFG_UNINSTALL_MANIFEST"
+  load_record || err "uninstall manifest is corrupt: $CFG_UNINSTALL_MANIFEST"
 
-  manifest_project=$(jq -er '.project' "$CFG_UNINSTALL_MANIFEST") \
-    || err "uninstall manifest is corrupt: $CFG_UNINSTALL_MANIFEST"
+  manifest_project=$(record_get project)
+  [ -n "$manifest_project" ] || err "uninstall manifest is corrupt: $CFG_UNINSTALL_MANIFEST"
   [ "$manifest_project" = "$CFG_PROJECT_NAME" ] \
     || err "uninstall manifest belongs to '$manifest_project', not '$CFG_PROJECT_NAME'"
 
   # Catches --install-dir or a config change since install with one clear
   # message, rather than letting every recorded path fail individually in
   # safe_remove further down.
-  manifest_install_dir=$(jq -er '.install_dir' "$CFG_UNINSTALL_MANIFEST") \
-    || err "uninstall manifest is corrupt: $CFG_UNINSTALL_MANIFEST"
+  manifest_install_dir=$(record_get install_dir)
   [ "$manifest_install_dir" = "$INSTALL_DIR" ] \
     || err "install_dir ('$INSTALL_DIR') differs from what was recorded at install time ('$manifest_install_dir') — uninstall would not find the real files. Re-run without --install-dir, or with the same install_dir used to install."
 
   confirm "Remove $CFG_PROJECT_NAME ($INSTALL_DIR/$COMMAND_NAME and related files)?" || err "aborted"
 
-  # Written to a file rather than piped straight into the loop: a pipeline's
-  # exit status is its last command's, so piping jq into a while-read loop would
-  # silently treat a jq failure as "nothing to uninstall" and still report success.
   files_list="$WORK_DIR/uninstall-files"
-  jq -r '.files[]' "$CFG_UNINSTALL_MANIFEST" > "$files_list" \
-    || err "uninstall manifest is corrupt: $CFG_UNINSTALL_MANIFEST"
+  recorded_files > "$files_list"
 
   info "removing $CFG_PROJECT_NAME"
   while IFS= read -r f; do
@@ -874,17 +870,14 @@ main() {
 
   detect_platform
   detect_pkg_manager
+  ensure_minisign
   fetch_manifest
-  VERSION=$(json_get version)
+  VERSION=$(flat_get "$WORK_DIR/manifest.flat" version)
   [ -n "$VERSION" ] && [ "$VERSION" != "null" ] || err "manifest did not report a version"
 
   resolve_asset_source
-  if [ "$ASSET_SOURCE" = manifest ]; then
-    info "resolved platform: $ASSET_KEY"
-    ASSET_URL=$(platform_field "$ASSET_KEY" url)
-  else
-    info "resolved via direct package URL ($PKG_MANAGER)"
-  fi
+  info "resolved platform: $ASSET_KEY"
+  ASSET_URL=$(platform_field "$ASSET_KEY" url)
 
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "would install $CFG_PROJECT_NAME $VERSION"
@@ -896,12 +889,8 @@ main() {
     exit 0
   fi
 
-  if [ "$ASSET_SOURCE" = manifest ]; then
-    download_asset "$ASSET_KEY"
-    verify_signature
-  else
-    fetch_pattern_asset
-  fi
+  download_asset "$ASSET_KEY"
+  verify_signature
   install_asset
   write_uninstall_manifest
   report_install

@@ -20,6 +20,17 @@ gets removed, the migration, and the condition that makes it safe to execute.
 - **Migration:** consumers delete the key; nothing else changes.
 - **Safe when:** the next major is cut.
 
+## Remove `github_repo`
+
+- **Now:** read and ignored. Native packages are taken from the manifest's
+  `linux-{arch}-deb`/`-rpm` keys; the GitHub Releases API is never queried.
+- **Kept because:** removing a `CFG_*` variable is a breaking change by this
+  repository's rule, and both consumer configs still set the key.
+- **Then:** the key is unknown to the engine and absent from the schema.
+- **Removes:** one assignment in `install.sh`, one row in the README.
+- **Migration:** consumers delete the key; nothing else changes.
+- **Safe when:** the next major is cut.
+
 ## Remove `macos_executable_name`
 
 - **Now:** optional override; the engine reads `CFBundleExecutable` from the bundle's
