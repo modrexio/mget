@@ -132,12 +132,28 @@ t_missing_owned_files_are_tolerated() {
 
 t_package_without_command_is_reported_not_rejected() {
   new_home; refract_1_4_0_env; PATH=$SYS_PATH
+  printf '#!/bin/sh
+' > "$OUT.foreign"; as_root install -m755 "$OUT.foreign" /usr/bin/refract
   run -y
+  as_root rm -f /usr/bin/refract
   [ "$STATUS" -eq 0 ] || fail "exit $STATUS"
   expect "via $PKG (provides: /usr/bin/refract-tauri"
   expect "this package does not provide a 'refract' command"
+  expect "'refract' currently runs /usr/bin/refract (not installed by this installer)"
   run --uninstall -y
   expect "removed package refract via $PKG"
+}
+
+t_install_dir_change_starts_a_fresh_record() {
+  new_home; modrex_env; PATH=$SYS_PATH
+  run --appimage
+  run --appimage --install-dir "$HOME/alt"
+  [ "$STATUS" -eq 0 ] || fail "exit $STATUS"
+  manifest_files | grep -q "^$HOME/alt/modrex$" || fail "new location not recorded"
+  ! manifest_files | grep -q "^$HOME/.local/bin/modrex$" || fail "old location carried into a manifest with another install_dir"
+  run --uninstall -y --install-dir "$HOME/alt"
+  [ "$STATUS" -eq 0 ] || fail "uninstall exit $STATUS"
+  [ ! -e "$HOME/alt/modrex" ] || fail "AppImage still present"
 }
 
 t_sudo_is_refused_before_network() {
@@ -164,7 +180,7 @@ t_dry_run_never_prompts() {
 ALL="t_appimage_not_on_path t_appimage_on_path_is_idempotent t_shadowing_is_reported
   t_native_accumulates_with_appimage t_uninstall_removes_recorded_reports_foreign
   t_dangling_symlink_is_reported t_v1_manifest_is_honoured t_missing_owned_files_are_tolerated
-  t_package_without_command_is_reported_not_rejected t_sudo_is_refused_before_network t_dry_run_never_prompts"
+  t_package_without_command_is_reported_not_rejected t_install_dir_change_starts_a_fresh_record t_sudo_is_refused_before_network t_dry_run_never_prompts"
 for t in ${TESTS:-$ALL}; do
   echo "$t"
   before=$FAILED; $t

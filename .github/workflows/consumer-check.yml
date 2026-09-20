@@ -24,6 +24,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: modrexio/mget
+          ref: ${{ github.job_workflow_sha }}
       - name: install deps
         run: |
           sudo apt-get update

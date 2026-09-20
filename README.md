@@ -84,7 +84,6 @@ Lives at the root of each project's own repo.
   "deb_package_name": "modrex",
   "rpm_package_name": "modrex",
   "install_dir": "$HOME/.local/bin",
-  "post_install_cmd": "$HOME/.local/bin/modrex --version",
   "uninstall_manifest": "$HOME/.modrex/uninstall.json",
   "install_url": "https://modrex.net/install.sh"
 }

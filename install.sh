@@ -285,7 +285,12 @@ preferred_variant_for() {
 # -L alone only means "follow redirects," not "stay on https," so a github.com
 # URL that happened to redirect to plain http would otherwise be followed.
 curl_download() {
-  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --retry 2 "$1" -o "$2"
+  local url out
+  url="$1"; out="$2"; shift 2
+  case "$url" in
+    https://api.github.com/*) set -- ${GITHUB_TOKEN:+-H} ${GITHUB_TOKEN:+"Authorization: Bearer $GITHUB_TOKEN"} ;;
+  esac
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --retry 2 "$@" "$url" -o "$out"
 }
 
 # Same as curl_download but with visible progress — for the actual asset
@@ -586,6 +591,7 @@ $DESKTOP_FILES"
       macos_executable="$CFG_MACOS_EXECUTABLE_NAME"
       [ -n "$macos_executable" ] \
         || macos_executable=$(plutil -extract CFBundleExecutable raw -o - "$app_bundle/Contents/Info.plist" 2>/dev/null) \
+        || macos_executable=$(defaults read "$app_bundle/Contents/Info" CFBundleExecutable 2>/dev/null) \
         || err "could not read CFBundleExecutable from the app bundle (set macos_executable_name in config)"
       # Validated on the extracted bundle before it ever replaces the working
       # install — catching a bad bundle here means the old version (and its
@@ -680,9 +686,12 @@ command_copies() {
 }
 
 recorded() {
-  [ -f "$CFG_UNINSTALL_MANIFEST" ] \
-    && jq -e --arg p "$1" '(.files | index($p)) != null or (($p | test("^/(usr/)?s?bin/")) and (.files | any(startswith("pkg:"))))' \
-         "$CFG_UNINSTALL_MANIFEST" >/dev/null 2>&1
+  local owner
+  [ -f "$CFG_UNINSTALL_MANIFEST" ] || return 1
+  owner=$(dpkg -S "$1" 2>/dev/null | sed 's/[,:].*//' | head -n 1)
+  [ -n "$owner" ] || owner=$(rpm -qf --queryformat '%{NAME}' "$1" 2>/dev/null || true)
+  jq -e --arg p "$1" --arg o "${owner:-/}" '(.files | index($p)) != null or (.files | any(endswith(":" + $o)))' \
+    "$CFG_UNINSTALL_MANIFEST" >/dev/null 2>&1
 }
 
 owner_label() {
@@ -730,8 +739,8 @@ write_uninstall_manifest() {
   tmp="$CFG_UNINSTALL_MANIFEST.tmp.$$"
   mkdir -p "$(dirname "$CFG_UNINSTALL_MANIFEST")"
   {
-    if [ -f "$CFG_UNINSTALL_MANIFEST" ]; then
-      jq -r '.files[]?' "$CFG_UNINSTALL_MANIFEST" 2>/dev/null | while IFS= read -r f; do
+    if jq -e --arg p "$CFG_PROJECT_NAME" --arg d "$INSTALL_DIR" '.project == $p and .install_dir == $d' "$CFG_UNINSTALL_MANIFEST" >/dev/null 2>&1; then
+      jq -r '.files[]?' "$CFG_UNINSTALL_MANIFEST" | while IFS= read -r f; do
         if target_present "$f"; then printf '%s\n' "$f"; fi
       done
     fi
