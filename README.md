@@ -16,8 +16,9 @@ asset directly.
 
 ### Requirements
 
-- `curl` and `jq` — always
-- `minisign` and `base64` — only when the project configures `pubkey`
+- `curl` and a POSIX `awk`/`sed`/`grep` — always (every supported system has them)
+- `minisign` and `base64` — only when the project configures `pubkey`; a missing
+  `minisign` is offered for installation through the system package manager
 - `dpkg-deb`/`rpm` — to inspect `.deb`/`.rpm` packages before installing
 - `tar` — for macOS `.app.tar.gz` installs
 - `sudo` and the relevant package manager (apt/dnf/zypper, or `dpkg`/`rpm` directly) —
@@ -27,9 +28,10 @@ asset directly.
 
 1. **The engine** (`install.sh`, this repo) knows nothing about any specific project.
 
-   - It reads the project's Tauri updater manifest to pick the right platform asset, or
-     looks up a `.deb`/`.rpm` on the GitHub Releases API directly — no exact filename
-     needs to be configured anywhere.
+   - It reads the project's Tauri updater manifest to pick the right platform asset —
+     the AppImage, `.app`, or a `.deb`/`.rpm` the manifest declares under its own key.
+     The manifest is the only source of assets: no filename is configured anywhere, and
+     nothing is rediscovered from the GitHub API.
    - On Linux, when a native package manager (apt/dnf/zypper) is detected and both a
      native package (`.deb`/`.rpm`) and an AppImage are available, it asks which to
      install (native is the default) — so updates can keep flowing through the system
@@ -94,7 +96,7 @@ Lives at the root of each project's own repo.
 | `schema_version` | ![yes](https://img.shields.io/badge/Yes-brightgreen) | Must currently be `1` — the engine hard-errors on anything else |
 | `project_name` | ![yes](https://img.shields.io/badge/Yes-brightgreen) | Used for default install/uninstall paths, desktop-entry and icon file names, and log messages. Letters, digits, `.`, `_`, `-` only, and cannot be exactly `.` or `..` — it ends up directly in filesystem paths |
 | `command_name` | ![no](https://img.shields.io/badge/No-red) | The command users type in a terminal (`modrex`, `refract`). Defaults to `project_name`; same character rules. It names the AppImage/macOS symlink in `install_dir` and is what the engine looks up on `PATH` to report availability. Native packages must ship it as `/usr/bin/{command_name}` themselves — the engine reports what a package actually provides, it never renames or aliases |
-| `github_repo` | ![no](https://img.shields.io/badge/No-red) | `owner/repo`. Used to look up `.deb`/`.rpm` assets via the GitHub Releases API when apt/dnf/zypper is detected — without it, Linux package-manager users fall back to the AppImage |
+| `github_repo` | ![no](https://img.shields.io/badge/No-red) | Deprecated. Accepted and ignored: native packages come from the manifest's `linux-*-deb`/`-rpm` keys, never from the GitHub Releases API. Slated for removal in the next major |
 | `manifest_url` | ![yes](https://img.shields.io/badge/Yes-brightgreen) | Tauri updater manifest URL, normally the `/releases/latest/download/latest.json` alias. Must be `https://` |
 | `pubkey` | ![no](https://img.shields.io/badge/No-red) | The raw minisign public key string (starts with `RW...`), *not* the value stored directly in `tauri.conf.json`'s `plugins.updater.pubkey` — that field is itself base64-encoded content of a full minisign pubkey file (comment line + key line). Decode it once (`echo "$TAURI_PUBKEY" \| base64 -d`) and take only the second line. Once set, the engine requires `minisign` and a valid signature — it refuses to install rather than silently skip verification. Leave unset until the project has real signing configured |
 | `preferred_variant` | ![no](https://img.shields.io/badge/No-red) | Per-OS suffix to prefer when the manifest has multiple platform-key variants for the same OS/arch (e.g. `linux-x86_64-deb` vs `linux-x86_64-appimage`). Takes priority over `.deb`/`.rpm` discovery via `github_repo` |
@@ -170,17 +172,10 @@ Nothing is claimed about future terminals, because nothing about them can be obs
 
 ## Known limitations
 
-- `.deb`/`.rpm` installs, discovered via the GitHub Releases API, are never
-  signature-verified — those assets aren't part of the signed Tauri updater manifest,
-  so mget doesn't currently consume any separate integrity metadata (hash or detached
-  signature) for them. Only the
-  manifest-sourced asset (normally the AppImage) gets minisign verification when a
-  project configures `pubkey`. The downloaded package's architecture/name metadata *is*
-  checked before install — that catches a wrong-architecture asset and rejects packages
-  whose metadata can't be read, but it's not the same guarantee as verifying it's the
-  artifact the maintainer actually intended to release.
-- The GitHub Releases API is unauthenticated and rate-limited to 60 requests/hour per
-  IP — fine for individual installs, but worth knowing.
+- A `.deb`/`.rpm` is installed only when the manifest declares it under
+  `linux-{arch}-deb`/`-rpm` (Tauri's `createUpdaterArtifacts` writes these keys, with
+  signatures). A project whose manifest lacks them gets the AppImage on every Linux
+  system, package manager or not.
 - Lines that earlier engine releases appended to shell rc files are left in place; they
   are harmless and no longer written.
 
@@ -225,8 +220,8 @@ that catches the most common way that discipline slips. Changes that are deliber
 held back for the next major are listed in
 [docs/planned-breaking-changes.md](docs/planned-breaking-changes.md).
 
-The two API-resolved forms add a third fetch (GitHub tags/releases API) on top of the
-two the Worker already makes, subject to the same 60 req/hour/IP limit noted above.
+The two API-resolved forms add a third fetch (GitHub tags API, unauthenticated and
+rate-limited to 60 requests/hour per IP) on top of the two the Worker already makes.
 
 ### Quoting config values safely
 
@@ -378,6 +373,6 @@ CFG_INSTALL_DIR='$HOME/.local/bin' \
 sh install.sh --dry-run
 ```
 
-`sh tests/run.sh` runs the behaviour tests (needs `jq`, `minisign`, network access,
+`sh tests/run.sh` runs the behaviour tests (needs `jq` as the reference JSON reader, `minisign`, network access,
 and either apt with passwordless `sudo` or dnf as root; each case uses a throwaway
 `HOME`). `TESTS="t_sudo_is_refused_before_network"` selects individual cases.

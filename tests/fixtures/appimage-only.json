@@ -1,0 +1,9 @@
+{
+  "version": "0.15.0",
+  "platforms": {
+    "linux-x86_64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWDJLc0ZoV0FEQXJ6dXpoYVE5TnZFSnc2SU41dlZRK1ptd3QzbU9RTHdycEhCK3Z5MVhQb0NMWnRLNm5QVHZ3WFBTVlpsUnBXTUluMTlQb0xaa1dyQmRZZ0Z5cXQvNXdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4OTE2ODUzCWZpbGU6TW9kcmV4XzAuMTUuMF9hbWQ2NC5BcHBJbWFnZQp2TFY2ZnpubjNsdlQrOGFrYUdzUXdaeVhnc0ZpbHppTGN2ZDVvZ0NJS2FhVVhOYjFpa0dDamtmTitlZEVQWUprVE9zR0ZKTU9RajY3S3J0MnRJVFlCdz09Cg==",
+      "url": "https://github.com/modrexio/modrex/releases/download/v0.15.0/modrex_x86_64.AppImage"
+    }
+  }
+}
